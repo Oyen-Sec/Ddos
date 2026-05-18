@@ -1,0 +1,66 @@
+{
+    "domain": "google.com",
+    "dns_records": {
+        "A": [
+            "172.217.194.102",
+            "172.217.194.101",
+            "172.217.194.138",
+            "172.217.194.113",
+            "172.217.194.139",
+            "172.217.194.100"
+        ],
+        "AAAA": [
+            "2404:6800:4003:c04::71",
+            "2404:6800:4003:c04::8b",
+            "2404:6800:4003:c04::65",
+            "2404:6800:4003:c04::64"
+        ],
+        "MX": [
+            "10 smtp.google.com."
+        ],
+        "NS": [
+            "ns4.google.com.",
+            "ns2.google.com.",
+            "ns3.google.com.",
+            "ns1.google.com."
+        ],
+        "TXT": [
+            "\"docusign=1b0a6754-49b1-4db5-8540-d2c12664b289\"",
+            "\"google-site-verification=wD8N7i1JTNTkezJ49swvWW48f8_9xveREV4oB-0Hf5o\"",
+            "\"globalsign-smime-dv=CDYX+XFHUw2wml6/Gb8+59BsH31KzUr6c1l2BPvqKX8=\"",
+            "\"onetrust-domain-verification=6d685f1d41a94696ad7ef771f68993e0\"",
+            "\"google-site-verification=TV9-DBe4R80X4v0M4U_bd_J9cpOJM0nikft0jAgjmsQ\"",
+            "\"facebook-domain-verification=22rm551cu4k0ab0bxsw536tlds4h95\"",
+            "\"onetrust-domain-verification=0d477fe608074e6f9c12bca7826035cc\"",
+            "\"apple-domain-verification=30afIBcvSuDV2PLX\"",
+            "\"cisco-ci-domain-verification=47c38bc8c4b74b7233e9053220c1bbe76bcc1cd33c7acf7acd36cd6a5332004b\"",
+            "\"google-site-verification=4ibFUgB-wXLQ_S7vsXVomSTVamuOXBiVAzpR5IZ87D0\"",
+            "\"MS=E4A68B9AB2BB9670BCE15412F62916164C0B20BB\"",
+            "\"docusign=05958488-4752-4ef2-95eb-aa7ba8a3bd0e\"",
+            "\"v=spf1 include:_spf.google.com ~all\""
+        ]
+    },
+    "ip_addresses": [
+        "172.217.194.102",
+        "172.217.194.101",
+        "172.217.194.138",
+        "172.217.194.113",
+        "172.217.194.139",
+        "172.217.194.100"
+    ],
+    "headers": {
+        "Content-Type": "text/html; charset=ISO-8859-1",
+        "Date": "Sat, 16 May 2026 22:45:12 GMT",
+        "Expires": "-1",
+        "Cache-Control": "private, max-age=0",
+        "Content-Security-Policy-Report-Only": "object-src 'none';base-uri 'self';script-src 'nonce-_dRrjvFCSp4TNfNnMwUsWg' 'strict-dynamic' 'report-sample' 'unsafe-eval' 'unsafe-inline' https: http:;report-uri https://csp.withgoogle.com/csp/gws/other-hp",
+        "P3P": "CP=\"This is not a P3P policy! See g.co/p3phelp for more info.\"",
+        "Content-Encoding": "gzip",
+        "Server": "gws",
+        "Content-Length": "27561",
+        "X-XSS-Protection": "0",
+        "X-Frame-Options": "SAMEORIGIN",
+        "Set-Cookie": "__Secure-STRP=AEEP7gLilaDGnAYgAfzDlKs5Bd6Sx2W54jaZ-VtFB_rsdDC9pkH9xEWeW6fMMVH_A9wCOGk5D3NmhDQq2xe0VSEv8jXPWj1bxw; expires=Sat, 16-May-2026 22:50:12 GMT; path=/; domain=.google.com; Secure; SameSite=strict, AEC=AaJma5vylBw4spjKA_HuoRySMkiUStUwcUOAf_4Tqaj6m5vF2SRBxXP4Yg; expires=Thu, 12-Nov-2026 22:45:12 GMT; path=/; domain=.google.com; Secure; HttpOnly; SameSite=lax, NID=531=Ai7hURH8bbhUxAQ5BpjlUCbwo3pEsFrxW0KBLeGFavatG6PsI79t1LmeubDqG3EDrH1moMuVFmXFK_-81xQdNR2j2pxTfqmmNb4-FxNhA1SZzrgih-XHhQKtNGv5U-SE3qlR4IUIS9K0P9glIsDHpyCiKgDxo4uMsNDOTmb05BzeOqD3SW5ahWCqG7XKk7xb14qkG8pwLBByBE0sJoCFing; expires=Sun, 15-Nov-2026 22:45:12 GMT; path=/; domain=.google.com; HttpOnly"
+    },
+    "waf_detected": false
+}

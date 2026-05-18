@@ -1,0 +1,16 @@
+{
+  "target": "https://example.com",
+  "metrics": {
+    "completed": 130,
+    "failed": 0,
+    "timeout": 0,
+    "total_requests": 130,
+    "current_rps": 12.9,
+    "peak_rps": 13.1,
+    "avg_response_time_ms": 71.5,
+    "active_proxies": 0,
+    "attack_method": "http_get_flood",
+    "tier": 1,
+    "status": "STOPPED"
+  }
+}

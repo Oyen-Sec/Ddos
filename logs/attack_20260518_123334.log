@@ -1,0 +1,62 @@
+{
+  "target": "https://slot996.com",
+  "metrics": {
+    "completed": 0,
+    "failed": 24,
+    "timeout": 0,
+    "total_requests": 24,
+    "current_rps": 0.0,
+    "peak_rps": 0.0,
+    "avg_response_time_ms": 1244.8,
+    "adaptive_target": 50,
+    "active_proxies": 6412,
+    "attack_method": "http_get_flood",
+    "status": "STOPPED",
+    "duration": 30.90764331817627,
+    "proxy_stats": {
+      "total": 6412,
+      "elite": 0,
+      "anonymous": 0,
+      "transparent": 0,
+      "dead": 304
+    }
+  },
+  "target_info": {
+    "url": "https://slot996.com",
+    "cms": "WordPress",
+    "waf": "Cloudflare",
+    "server": "",
+    "top_endpoints": [
+      [
+        "/admin",
+        404,
+        422.0,
+        0.24
+      ],
+      [
+        "/wp-json/",
+        200,
+        469.0,
+        0.19
+      ],
+      [
+        "/user",
+        404,
+        437.0,
+        0.18
+      ],
+      [
+        "/login",
+        404,
+        531.0,
+        0.17
+      ],
+      [
+        "/phpmyadmin/",
+        404,
+        515.0,
+        0.17
+      ]
+    ]
+  }
+}

@@ -1,0 +1,59 @@
+{
+    "domain": "musicarura.nl",
+    "dns": {
+        "records": {
+            "A": [
+                "87.239.9.15"
+            ],
+            "AAAA": [
+                "2001:678:be4:9::15"
+            ],
+            "NS": [
+                "intention.ns02.nl.",
+                "intention.ns03.nl.",
+                "intention.ns04.org.",
+                "intention.ns01.nl."
+            ],
+            "TXT": [
+                "\"Sendinblue-code:f791e85c40bf8354dd54d45684bbfc5f\"",
+                "\"v=spf1 a mx include:spf.spamcluster.nl include:spf.sendinblue.com include:spf.eprov.eu ~all\"",
+                "\"brevo-code:f791e85c40bf8354dd54d45684bbfc5f\""
+            ],
+            "SOA": [
+                "intention.ns01.nl. hostmaster.intention.nl. 2026044844 3600 14400 604800 3600"
+            ]
+        },
+        "dnssec": false,
+        "axfr": false
+    },
+    "ip_addresses": [
+        "87.239.9.15"
+    ],
+    "headers": {
+        "content-type": "text/html; charset=UTF-8",
+        "permissions-policy": "private-state-token-redemption=(self \"https://www.google.com\" \"https://www.gstatic.com\" \"https://recaptcha.net\" \"https://challenges.cloudflare.com\" \"https://hcaptcha.com\"), private-state-token-issuance=(self \"https://www.google.com\" \"https://www.gstatic.com\" \"https://recaptcha.net\" \"https://challenges.cloudflare.com\" \"https://hcaptcha.com\")",
+        "link": "<https://musicarura.nl/wp-json/>; rel=\"https://api.w.org/\", <https://musicarura.nl/wp-json/wp/v2/pages/694>; rel=\"alternate\"; type=\"application/json\", <https://musicarura.nl/>; rel=shortlink",
+        "x-tec-api-version": "v1",
+        "x-tec-api-root": "https://musicarura.nl/wp-json/tribe/events/v1/",
+        "x-tec-api-origin": "https://musicarura.nl",
+        "content-encoding": "gzip",
+        "vary": "Accept-Encoding",
+        "date": "Sat, 16 May 2026 23:13:48 GMT",
+        "server": "LiteSpeed",
+        "alt-svc": "h3=\":443\"; ma=2592000, h3-29=\":443\"; ma=2592000, h3-Q050=\":443\"; ma=2592000, h3-Q046=\":443\"; ma=2592000, h3-Q043=\":443\"; ma=2592000, quic=\":443\"; ma=2592000; v=\"43,46\""
+    },
+    "waf": {
+        "detected": false,
+        "vendor": null,
+        "confidence": 0
+    },
+    "tech_stack": {
+        "server": "LiteSpeed",
+        "frameworks": [],
+        "cms": "WordPress 6.5.4",
+        "frontend_libs": [
+            "jQuery"
+        ]
+    },
+    "cdn": null
+}

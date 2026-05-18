@@ -1,0 +1,16 @@
+{
+  "target": "https://httpbin.org",
+  "metrics": {
+    "completed": 10,
+    "failed": 0,
+    "timeout": 0,
+    "total_requests": 10,
+    "current_rps": 1.0,
+    "peak_rps": 1.0,
+    "avg_response_time_ms": 1017.2,
+    "active_proxies": 0,
+    "attack_method": "http_get_flood",
+    "tier": 1,
+    "status": "STOPPED"
+  }
+}

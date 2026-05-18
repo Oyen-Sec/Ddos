@@ -1,0 +1,31 @@
+proxy:
+  check_url: "https://httpbin.org/ip"
+  connect_timeout: 3
+  read_timeout: 3
+  max_connect_time_ms: 3000
+  min_pool_size: 10
+  health_check_interval: 60
+  max_failures_before_remove: 3
+
+target:
+  default_port: 443
+  max_redirects: 5
+  follow_redirects: false
+
+attack:
+  default_duration: 3600
+  default_method: "http_get_flood"
+  max_rps: 1000
+  min_rps: 10
+  initial_rps: 100
+  adaptive_threshold_error_pct: 30
+  adaptive_threshold_timeout_ms: 3000
+  rps_increase_pct: 20
+  rps_decrease_pct: 50
+  delay_jitter_min: 0.05
+  delay_jitter_max: 0.5
+  proxy_rotation_per_requests: 5
+
+logging:
+  level: "INFO"
+  file_path: "logs/"

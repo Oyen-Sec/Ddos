@@ -1,0 +1,7 @@
+[
+  {
+    "domain": "example-target.com",
+    "priority": "high",
+    "description": "Sample target for testing"
+  }
+]

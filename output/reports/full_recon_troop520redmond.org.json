@@ -1,0 +1,68 @@
+{
+    "domain": "troop520redmond.org",
+    "dns": {
+        "records": {
+            "A": [
+                "104.21.72.81",
+                "172.67.177.138"
+            ],
+            "AAAA": [
+                "2606:4700:3030::ac43:b18a",
+                "2606:4700:3034::6815:4851"
+            ],
+            "NS": [
+                "logan.ns.cloudflare.com.",
+                "yolanda.ns.cloudflare.com."
+            ],
+            "TXT": [
+                "\"v=spf1 mx a ~all\""
+            ],
+            "SOA": [
+                "logan.ns.cloudflare.com. dns.cloudflare.com. 2404209075 10000 2400 604800 1800"
+            ]
+        },
+        "dnssec": true,
+        "axfr": false
+    },
+    "ip_addresses": [
+        "104.21.72.81",
+        "172.67.177.138"
+    ],
+    "headers": {
+        "Date": "Sat, 16 May 2026 23:03:12 GMT",
+        "Content-Type": "text/html; charset=UTF-8",
+        "Transfer-Encoding": "chunked",
+        "Connection": "close",
+        "Accept-Ch": "Sec-CH-UA-Bitness, Sec-CH-UA-Arch, Sec-CH-UA-Full-Version, Sec-CH-UA-Mobile, Sec-CH-UA-Model, Sec-CH-UA-Platform-Version, Sec-CH-UA-Full-Version-List, Sec-CH-UA-Platform, Sec-CH-UA, UA-Bitness, UA-Arch, UA-Full-Version, UA-Mobile, UA-Model, UA-Platform-Version, UA-Platform, UA",
+        "Cf-Mitigated": "challenge",
+        "Content-Security-Policy": "default-src 'none'; script-src 'nonce-H9FcOdEypKhgMfVO6ptnn4' 'unsafe-eval' https://challenges.cloudflare.com; script-src-attr 'none'; style-src 'unsafe-inline'; img-src 'self' https://challenges.cloudflare.com; connect-src 'self' https://challenges.cloudflare.com; frame-src 'self' https://challenges.cloudflare.com blob:; child-src 'self' https://challenges.cloudflare.com blob:; worker-src blob:; form-action http: https:; base-uri 'self'",
+        "Server": "cloudflare",
+        "Critical-Ch": "Sec-CH-UA-Bitness, Sec-CH-UA-Arch, Sec-CH-UA-Full-Version, Sec-CH-UA-Mobile, Sec-CH-UA-Model, Sec-CH-UA-Platform-Version, Sec-CH-UA-Full-Version-List, Sec-CH-UA-Platform, Sec-CH-UA, UA-Bitness, UA-Arch, UA-Full-Version, UA-Mobile, UA-Model, UA-Platform-Version, UA-Platform, UA",
+        "Cross-Origin-Embedder-Policy": "require-corp",
+        "Cross-Origin-Opener-Policy": "same-origin",
+        "Cross-Origin-Resource-Policy": "same-origin",
+        "Origin-Agent-Cluster": "?1",
+        "Permissions-Policy": "accelerometer=(),browsing-topics=(),camera=(),clipboard-read=(),clipboard-write=(),geolocation=(),gyroscope=(),hid=(),interest-cohort=(),magnetometer=(),microphone=(),payment=(),publickey-credentials-get=(),screen-wake-lock=(),serial=(),sync-xhr=(),usb=(),xr-spatial-tracking=(self)",
+        "Referrer-Policy": "same-origin",
+        "Server-Timing": "chlray;desc=\"9fce03ae0f69c9c6\"",
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "SAMEORIGIN",
+        "Report-To": "{\"group\":\"cf-nel\",\"max_age\":604800,\"endpoints\":[{\"url\":\"https://a.nel.cloudflare.com/report/v4?s=d%2FZoA2k%2Ftfy7f61v%2BrVtxUzj1jJeSvX%2Bb4pOnMungJ0ziq7qmix5%2FX7jCzJuPu8vU6U%2FYSFGHLmUUsLX2jb8PVfUrhn%2FJwU5xe5s9u9aH9UYilXVlZJRyeoRYkfC10YLjsiSwN3u\"}]}",
+        "Nel": "{\"report_to\":\"cf-nel\",\"success_fraction\":0.0,\"max_age\":604800}",
+        "Content-Encoding": "gzip",
+        "CF-RAY": "9fce03ae0f69c9c6-SIN",
+        "alt-svc": "h3=\":443\"; ma=86400"
+    },
+    "waf": {
+        "detected": true,
+        "vendor": "Cloudflare",
+        "confidence": 100
+    },
+    "tech_stack": {},
+    "cdn": "Cloudflare",
+    "historical_ips": [],
+    "subdomains": [
+        "www.troop520redmond.org"
+    ],
+    "origin_ip_candidates": []
+}

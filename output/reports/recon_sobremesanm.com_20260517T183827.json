@@ -1,0 +1,40 @@
+{
+    "metadata": {
+        "version": "2.0",
+        "timestamp": "2026-05-17T11:36:33Z",
+        "domain": "sobremesanm.com",
+        "duration_seconds": 0.38,
+        "tier_completed": 1
+    },
+    "dns_analysis": {
+        "a_records": [],
+        "aaaa_records": [],
+        "mx_records": [],
+        "ns_records": [],
+        "txt_records": [],
+        "soa": {},
+        "dnssec": false,
+        "zone_transfer_vulnerable": false,
+        "cdn_vendor": null
+    },
+    "ip_intelligence": [],
+    "ssl_tls_analysis": {},
+    "http_headers_analysis": {
+        "headers": {},
+        "security_headers": {},
+        "cookies": [],
+        "cdn_features": [],
+        "bypass_opportunities": []
+    },
+    "waf_analysis": {
+        "vendor": null,
+        "confidence": 0,
+        "vectors": []
+    },
+    "technology_stack": {
+        "server": null,
+        "cdn": null
+    },
+    "attack_surface_summary": {},
+    "recommendations": {}
+}

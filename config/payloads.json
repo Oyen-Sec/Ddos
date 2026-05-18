@@ -1,0 +1,15 @@
+{
+  "http_get": [
+    "/?q={random_string}",
+    "/search?query={random_string}&page={random_int}"
+  ],
+  "http_post": [
+    {
+      "path": "/login",
+      "data": {
+        "user": "{random_user}",
+        "pass": "{random_pass}"
+      }
+    }
+  ]
+}

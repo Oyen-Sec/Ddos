@@ -1,0 +1,16 @@
+{
+  "target": "https://slot996.com",
+  "metrics": {
+    "completed": 383,
+    "failed": 0,
+    "timeout": 0,
+    "total_requests": 383,
+    "current_rps": 25.5,
+    "peak_rps": 25.5,
+    "avg_response_time_ms": 33.1,
+    "active_proxies": 0,
+    "attack_method": "http_get_flood",
+    "tier": 1,
+    "status": "STOPPED"
+  }
+}

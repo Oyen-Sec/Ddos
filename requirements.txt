@@ -1,0 +1,6 @@
+curl_cffi>=0.6.0
+pyyaml>=6.0
+aiohttp>=3.9.0
+aiohttp-socks>=0.8.0
+asyncio-throttle>=1.0.0
+nodriver>=0.37.0

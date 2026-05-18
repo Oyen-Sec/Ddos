@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  ddos-sovereign:
+    build: .
+    volumes:
+      - ./output:/app/output
+      - ./config:/app/config
+    network_mode: host
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G

@@ -1,0 +1,20 @@
+global:
+  threads: 50
+  timeout: 10
+  retry_count: 3
+  user_agent_rotation: true
+  proxy_rotation: true
+
+recon:
+  dns_enum: true
+  subdomain_brute: true
+  shodan_scan: false
+
+attack:
+  default_duration: 3600
+  default_vector: "http_get_flood"
+  max_nodes: 100
+
+logging:
+  level: "INFO"
+  file_path: "output/logs/app.log"
