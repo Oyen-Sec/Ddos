@@ -47,7 +47,7 @@ class AttackVector:
 
 
 class SmartEndpointDiscovery:
-    def __init__(self, timeout: int = 8):
+    def __init__(self, timeout: int = 5):
         self.timeout = timeout
         self.vectors: List[EndpointInfo] = []
         self._ua_pool = [
@@ -66,7 +66,7 @@ class SmartEndpointDiscovery:
         if not base.startswith("http"):
             base = "https://" + base
 
-        async def _test(path: str, method: str = "GET", data: Optional[str] = None) -> Optional[EndpointInfo]:
+        def _test_sync(path: str, method: str = "GET", data: Optional[str] = None) -> Optional[EndpointInfo]:
             try:
                 s = Session(impersonate="chrome124", timeout=self.timeout)
                 ua = random.choice(self._ua_pool)
@@ -90,13 +90,14 @@ class SmartEndpointDiscovery:
             except Exception:
                 return None
 
+        loop = asyncio.get_event_loop()
         tasks = []
         for path in PROBE_PATHS:
-            tasks.append(_test(path, "GET"))
+            tasks.append(loop.run_in_executor(None, _test_sync, path, "GET"))
             if path in ["/", "/wp-login.php", "/xmlrpc.php"]:
-                tasks.append(_test(path, "POST", "test=1"))
+                tasks.append(loop.run_in_executor(None, _test_sync, path, "POST", "test=1"))
             if path in ["/wp-cron.php", "/robots.txt"]:
-                tasks.append(_test(path, "HEAD"))
+                tasks.append(loop.run_in_executor(None, _test_sync, path, "HEAD"))
         results = await asyncio.gather(*tasks, return_exceptions=True)
         seen = set()
         for r in results:

@@ -163,6 +163,16 @@ class TargetAnalyzer:
         ips = list(set(ips))
         return ips[0] if ips else "", ips, is_cdn
 
+    def discover_origin_advanced(self, url: str, censys_id: str = None, censys_secret: str = None,
+                                  shodan_key: str = None, securitytrails_key: str = None):
+        """Use OriginFinder for comprehensive origin IP discovery"""
+        from core.origin_finder import OriginFinder
+        finder = OriginFinder(timeout=self.timeout)
+        parsed = urlparse(url)
+        domain = parsed.hostname or url
+        report = finder.find_origin(domain, censys_id, censys_secret, shodan_key, securitytrails_key)
+        return report
+
     def discover_origin_crtsh(self, domain: str) -> List[str]:
         ips = []
         try:

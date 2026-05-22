@@ -1,0 +1,14 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "x5lab": {
+      "api": "openai",
+      "name": "x5LAB",
+      "options": {
+        "apiKey": "x5-1b188ed418036d329525ef4f96937b89",
+        "baseURL": "https://api.x5lab.dev/v1"
+      }
+    }
+  },
+  "model": "x5lab/claude-sonnet-4"
+}

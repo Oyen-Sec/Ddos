@@ -42,6 +42,10 @@ class ProxyValidator:
         self.read_timeout = read_timeout
         self.max_connect_time_ms = max_connect_time_ms
 
+    def set_target(self, target_url: str):
+        parsed = urlparse(target_url)
+        self.check_url = f"{parsed.scheme}://{parsed.netloc}/cdn-cgi/trace"
+
     def _parse(self, url: str) -> Tuple[str, str, int]:
         p = urlparse(url)
         return p.scheme.lower(), p.hostname or "", p.port or 1080
@@ -152,14 +156,17 @@ class ProxyPool:
                 return await self._validator.validate(ps.url)
         results = await asyncio.gather(*[_v(ps) for ps in batch], return_exceptions=True)
         alive = 0
+        validated_urls = set()
         for i, r in enumerate(results):
+            ps = batch[i]
+            validated_urls.add(ps.url)
             if isinstance(r, ProxyStatus) and r.alive:
                 tier = r.tier if r.tier in self._pools else "datacenter"
                 self._pools[tier].append(r)
                 alive += 1
             else:
-                self._dead.append(batch[i].url)
-            self._pending.remove(batch[i])
+                self._dead.append(ps.url)
+        self._pending = [ps for ps in self._pending if ps.url not in validated_urls]
         return alive
 
     async def validate_background(self, concurrency: int = 100, batch_size: int = 500):
@@ -223,6 +230,97 @@ class ProxyPool:
                 return ps
         return None
 
+    async def get_proxy_weighted(self, preferred_tier: str = "mobile") -> Optional[ProxyStatus]:
+        """
+        Get proxy via weighted random selection.
+        Higher weight = lower fail_count + lower rtt + higher success_count.
+        """
+        tiers = [preferred_tier, "residential", "ipv6", "datacenter"]
+        async with self._lock:
+            for t in tiers:
+                if t in self._pools and self._pools[t]:
+                    pool = self._pools[t]
+                    weights = []
+                    for ps in pool:
+                        # Weight formula: success_count / (1 + fail_count + rtt_ema/1000)
+                        w = (ps.success_count + 1) / (1 + ps.fail_count + ps.rtt_ema / 1000)
+                        weights.append(w)
+                    if sum(weights) == 0:
+                        return random.choice(pool)
+                    return random.choices(pool, weights=weights, k=1)[0]
+        return None
+
+    async def get_proxy_random(self, preferred_tier: str = "mobile") -> Optional[ProxyStatus]:
+        """Pure random selection within preferred tier."""
+        tiers = [preferred_tier, "residential", "ipv6", "datacenter"]
+        async with self._lock:
+            for t in tiers:
+                if t in self._pools and self._pools[t]:
+                    return random.choice(self._pools[t])
+        return None
+
+    async def get_proxy_sticky(self, worker_id: int, preferred_tier: str = "mobile") -> Optional[ProxyStatus]:
+        """Sticky session: same worker_id gets same proxy via modulo."""
+        tiers = [preferred_tier, "residential", "ipv6", "datacenter"]
+        async with self._lock:
+            for t in tiers:
+                if t in self._pools and self._pools[t]:
+                    pool = self._pools[t]
+                    return pool[worker_id % len(pool)]
+        return None
+
+    async def report_success(self, ps: ProxyStatus, rtt_ms: float = 0.0):
+        """Report successful use of proxy. Updates EMA and counter."""
+        ps.success_count += 1
+        if rtt_ms > 0:
+            # EMA with alpha=0.3
+            ps.rtt_ema = ps.rtt_ema * 0.7 + rtt_ms * 0.3 if ps.rtt_ema > 0 else rtt_ms
+
+    async def report_failure(self, ps: ProxyStatus):
+        """Report failed use. Auto-quarantine if exceeds max_fail."""
+        ps.fail_count += 1
+        if ps.fail_count >= self.max_fail:
+            async with self._lock:
+                for t in self._pools:
+                    if ps in self._pools[t]:
+                        self._pools[t].remove(ps)
+                        self._dead.append(ps.url)
+                        break
+
+    async def detect_tiers(self, concurrency: int = 20):
+        """
+        Re-classify all alive proxies into proper tiers via ASN lookup.
+        Run after quick_validate() to upgrade datacenter classifications.
+        """
+        try:
+            from core.tier_detection import detect_proxy_tier
+        except ImportError:
+            logger.warning("tier_detection not available, skipping")
+            return
+
+        sem = asyncio.Semaphore(concurrency)
+
+        async def reclassify(ps: ProxyStatus):
+            async with sem:
+                try:
+                    new_tier = await detect_proxy_tier(ps.url, ps.external_ip)
+                    if new_tier != ps.tier:
+                        async with self._lock:
+                            if ps.tier in self._pools and ps in self._pools[ps.tier]:
+                                self._pools[ps.tier].remove(ps)
+                            ps.tier = new_tier
+                            if new_tier in self._pools:
+                                self._pools[new_tier].append(ps)
+                except Exception:
+                    pass
+
+        all_proxies = []
+        async with self._lock:
+            for pool in self._pools.values():
+                all_proxies.extend(pool)
+
+        await asyncio.gather(*[reclassify(ps) for ps in all_proxies], return_exceptions=True)
+
     def stats(self) -> dict:
         s = {}
         for t, pool in self._pools.items():
@@ -231,3 +329,16 @@ class ProxyPool:
         s["pending"] = len(self._pending)
         s["total"] = sum(len(v) for v in self._pools.values())
         return s
+
+    def get_alive_urls(self) -> List[str]:
+        urls = []
+        for pool in self._pools.values():
+            for ps in pool:
+                urls.append(ps.url)
+        return urls
+
+    def save_alive(self, path: str = "proxies/alive.txt"):
+        urls = self.get_alive_urls()
+        with open(path, "w") as f:
+            f.write("\n".join(urls) + "\n")
+        return len(urls)
