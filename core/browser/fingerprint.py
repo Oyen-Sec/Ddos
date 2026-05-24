@@ -1,5 +1,5 @@
 """
-NOIR v7.0 - Browser Fingerprint Module
+Multi-Protocol Concurrency Layer - Browser Fingerprint Module
 Generates unique, realistic browser fingerprints per instance
 """
 import random

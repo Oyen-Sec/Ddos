@@ -1,5 +1,5 @@
 """
-NOIR v7.0 - WAF Detector Module
+Multi-Protocol Concurrency Layer - WAF Detector Module
 Detects and identifies WAF systems (MalCare, Cloudflare, Wordfence, etc.)
 """
 import re

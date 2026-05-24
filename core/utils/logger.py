@@ -1,5 +1,5 @@
 """
-NOIR v7.0 - RAM-Only Logger
+Multi-Protocol Concurrency Layer - RAM-Only Logger
 No disk writes - all logs kept in memory
 """
 import logging
@@ -55,10 +55,10 @@ class MemoryLogHandler(logging.Handler):
         self.entries.clear()
 
 
-class NoirLogger:
-    """Main logger class for NOIR v7.0"""
+class MPCLogger:
+    """Main logger class for Multi-Protocol Concurrency Layer"""
     
-    def __init__(self, name: str = "noir", level: int = logging.INFO):
+    def __init__(self, name: str = "mpc_layer", level: int = logging.INFO):
         self.name = name
         self.level = level
         self.logger = logging.getLogger(name)
@@ -102,4 +102,4 @@ class NoirLogger:
 
 
 # Global logger instance
-logger = NoirLogger()
+logger = MPCLogger()

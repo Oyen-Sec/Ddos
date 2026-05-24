@@ -4,6 +4,8 @@ global:
   retry_count: 3
   user_agent_rotation: true
   proxy_rotation: true
+  max_memory_percent: 80
+  gc_interval_minutes: 5
 
 recon:
   dns_enum: true
@@ -11,10 +13,46 @@ recon:
   shodan_scan: false
 
 attack:
-  default_duration: 3600
+  default_duration: 300
   default_vector: "http_get_flood"
   max_nodes: 100
+  max_rps: 10000
+  min_rps: 10
+  initial_rps: 1000
+  adaptive_threshold_error_pct: 30
+  adaptive_threshold_timeout_ms: 3000
+  rps_increase_pct: 20
+  rps_decrease_pct: 50
+  proxy_rotation_per_requests: 5
+  go_engine_priority: true
+  rapid_reset_enabled: true
+  http2_enabled: true
+  syn_flood_enabled: true
+  udp_flood_enabled: true
+
+proxy:
+  check_url: "https://httpbin.org/ip"
+  connect_timeout: 3
+  read_timeout: 3
+  max_connect_time_ms: 3000
+  min_pool_size: 10
+  health_check_interval: 60
+  max_failures_before_remove: 3
+  enable_chaining: true
+  enable_tor: false
+  tor_proxy: "socks5h://127.0.0.1:9050"
+
+evasion:
+  ja3_spoofing: true
+  ja4_spoofing: true
+  header_case_rotation: true
+  header_order_randomization: true
+  cookie_rotation: true
+  referer_spoofing: true
+  accept_language_rotation: true
+  tls_fingerprint: "chrome136"
 
 logging:
   level: "INFO"
   file_path: "output/logs/app.log"
+  metrics_interval_seconds: 2

@@ -1,0 +1,27 @@
+{
+  "target": "https://gacor88top.bond/",
+  "host": "gacor88top.bond",
+  "timestamp": 1779589538.982878,
+  "timestamp_human": "2026-05-24 09:25:38",
+  "verified_origins": [],
+  "candidates": [
+    {
+      "ip": "43.173.57.48",
+      "confidence": 8.55000000000001,
+      "source": "subdomain",
+      "verified": false,
+      "response_match": false,
+      "response_status": 0,
+      "server": ""
+    },
+    {
+      "ip": "188.114.97.1",
+      "confidence": 0.3,
+      "source": "hackertarget",
+      "verified": false,
+      "response_match": false,
+      "response_status": 0,
+      "server": ""
+    }
+  ]
+}

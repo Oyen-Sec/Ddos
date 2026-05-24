@@ -1,5 +1,5 @@
 """
-NOIR PROJECT v6.0 - Adaptive Attack Engine
+Multi-Protocol Concurrency Layer - Adaptive Attack Coordinator
 Auto-detects server responses (429, 403, TCP RST) and switches methods/headers dynamically
 """
 import asyncio

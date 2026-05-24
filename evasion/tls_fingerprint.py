@@ -1,5 +1,5 @@
 """
-NOIR PROJECT v6.0 - JA4/JA3+ Fingerprint Spoofing Engine
+Multi-Protocol Concurrency Layer - JA4/JA3+ Fingerprint Spoofing Module
 Replicates TLS handshake, ALPN, and cipher suites like real 2026 browsers
 """
 import random

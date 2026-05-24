@@ -1,0 +1,20 @@
+{
+  "target": "https://portal.projectspine.com/",
+  "host": "portal.projectspine.com",
+  "timestamp": 1779503255.9278536,
+  "timestamp_human": "2026-05-23 09:27:35",
+  "verified_origins": [
+    "13.89.172.4"
+  ],
+  "candidates": [
+    {
+      "ip": "13.89.172.4",
+      "confidence": 1.0,
+      "source": "hackertarget",
+      "verified": true,
+      "response_match": true,
+      "response_status": 200,
+      "server": "nginx/1.28.0"
+    }
+  ]
+}

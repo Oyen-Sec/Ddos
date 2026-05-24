@@ -1,5 +1,5 @@
 """
-NOIR PROJECT v6.0 - Smart Session Flow (Browser Emulation 2.0)
+Multi-Protocol Concurrency Layer - Smart Session Flow (Browser Emulation Module)
 Mimics human browsing patterns: landing page -> resource waterfall -> attack
 """
 import asyncio

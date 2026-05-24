@@ -1,5 +1,5 @@
 """
-NOIR PROJECT v6.0 - Advanced Header Randomization Engine
+Multi-Protocol Concurrency Layer - Advanced Header Randomization Module
 100+ UA x 50+ Referer x 20+ Accept-Language with case rotation and order randomization
 """
 import random

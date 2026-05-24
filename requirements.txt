@@ -1,6 +1,24 @@
-curl_cffi>=0.6.0
-pyyaml>=6.0
+# Cross-platform: Windows + Linux VPS
+
+# Core dependencies
 aiohttp>=3.9.0
+requests>=2.31.0
+urllib3>=2.0.0
+
+# Performance (optional but recommended for Linux)
+uvloop>=0.19.0; sys_platform == 'linux'
+
+# Terminal UI
+rich>=13.0.0
+colorama>=0.4.6
+
+# Utilities
+pyyaml>=6.0
+python-dotenv>=1.0.0
+
+# Proxy support
+pysocks>=1.7.1
 aiohttp-socks>=0.8.0
-asyncio-throttle>=1.0.0
-nodriver>=0.37.0
+
+# SSL/TLS
+certifi>=2023.0.0

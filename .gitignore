@@ -1,0 +1,81 @@
+# KILLER ENGINE V2.0 - Git Ignore
+# Exclude sensitive files and credentials
+
+# Sensitive files
+opencode.json
+opencode.jsonc
+.opencode/
+*.env
+.env.*
+
+# Proxy files (sensitive - contains credentials)
+proxies/prmium.txt
+proxies/premium_proxy.txt
+proxies/premium_converted.txt
+
+# API keys and credentials
+config/.env
+config/credentials.json
+*.key
+*.pem
+*.crt
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+logs/
+*.out
+
+# Test files
+test_*.py
+*_test.py
+
+# Temporary files
+*.tmp
+*.bak
+*.cache
+temp/
+tmp/
+
+# OS
+Thumbs.db
+desktop.ini
+
+# Project specific
+results/
+output/
+data/
+*.db
+*.sqlite

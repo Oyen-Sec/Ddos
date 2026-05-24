@@ -1,5 +1,5 @@
 """
-NOIR PROJECT v6.0 - Modern User-Agent Pool (2026)
+Multi-Protocol Concurrency Layer - Modern User-Agent Pool (2026)
 Updated to Chrome 136+, Firefox 140+, Safari 18+, Edge 136+
 """
 import random

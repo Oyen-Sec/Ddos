@@ -1,0 +1,94 @@
+{
+  "version": "3.0",
+  "platform": "windows",
+  "engine": {
+    "default": "raw_http11",
+    "fallback_threshold_pct": 10,
+    "fallback_window_seconds": 5,
+    "pipeline_depth": 48,
+    "max_payload_bytes": 192,
+    "connection_pool_per_worker": 400,
+    "socket_send_chunk_bytes": 12288,
+    "tcp_nodelay": true,
+    "so_reuseaddr": true,
+    "so_linger_zero": true,
+    "keep_alive_seconds": 30
+  },
+  "thread_isolation": {
+    "stats_queue_maxsize": 1000,
+    "drop_old_when_full": true,
+    "monitor_thread_daemon": true,
+    "executor_max_workers_multiplier": 2,
+    "dashboard_fps": 20,
+    "dashboard_refresh_ms": 50,
+    "stalled_threshold_ms": 8000
+  },
+  "phases": {
+    "phase_0_recon": {
+      "duration_seconds": 1,
+      "rps_factor": 0.0,
+      "label": "RECON"
+    },
+    "phase_1_warmup": {
+      "duration_pct": 0.02,
+      "rps_factor": 0.50,
+      "label": "WARMUP"
+    },
+    "phase_2_ramp": {
+      "duration_pct": 0.05,
+      "rps_factor": 0.80,
+      "label": "RAMP"
+    },
+    "phase_3_peak": {
+      "duration_pct": 0.85,
+      "rps_factor": 3.50,
+      "label": "PEAK"
+    },
+    "phase_4_validate": {
+      "duration_pct": 0.03,
+      "rps_factor": 2.00,
+      "label": "VALIDATE",
+      "ping_check": true,
+      "ping_rtt_threshold_ms": 10000,
+      "saturated_rps_factor": 1.50
+    },
+    "phase_5_cooldown": {
+      "duration_pct": 0.05,
+      "rps_factor": 1.00,
+      "label": "COOLDOWN"
+    }
+  },
+  "self_health": {
+    "loop_lag_check_interval_seconds": 10.0,
+    "loop_lag_threshold_ms": 5000,
+    "wsa_would_block_window_seconds": 10.0,
+    "wsa_would_block_threshold": 500,
+    "throttle_factor_on_overload": 0.99
+  },
+  "validation": {
+    "buffer_validate_send_return": true,
+    "track_local_drops": true,
+    "track_actual_rps": true,
+    "track_local_queue": true,
+    "track_os_backpressure": true,
+    "track_network_health": true
+  },
+  "windows_optimization": {
+    "process_priority": "BELOW_NORMAL",
+    "affinity_even_cores_only": false,
+    "use_iocp": false,
+    "use_select_poll_timeout": 0.1,
+    "minimum_concurrent_per_worker": 50,
+    "maximum_concurrent_per_worker": 800
+  },
+  "vector_status_states": {
+    "STARTING": {"color": "yellow", "weight": 0},
+    "WARMUP": {"color": "blue", "weight": 1},
+    "ACTIVE": {"color": "green", "weight": 2},
+    "THROTTLED": {"color": "red", "weight": 3},
+    "COOLDOWN": {"color": "cyan", "weight": 4},
+    "DONE": {"color": "white", "weight": 5},
+    "STALLED": {"color": "bright_red", "weight": 6},
+    "ERROR": {"color": "bright_red", "weight": 7}
+  }
+}

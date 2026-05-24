@@ -1,0 +1,27 @@
+{
+  "target": "https://puertomaderoeditorial.com.ar/",
+  "host": "puertomaderoeditorial.com.ar",
+  "timestamp": 1779532742.874874,
+  "timestamp_human": "2026-05-23 17:39:02",
+  "verified_origins": [],
+  "candidates": [
+    {
+      "ip": "216.246.46.197",
+      "confidence": 1.2,
+      "source": "hackertarget+subdomain+mx",
+      "verified": false,
+      "response_match": false,
+      "response_status": 0,
+      "server": ""
+    },
+    {
+      "ip": "216.246.46.194",
+      "confidence": 0.3,
+      "source": "hackertarget",
+      "verified": false,
+      "response_match": false,
+      "response_status": 0,
+      "server": ""
+    }
+  ]
+}
