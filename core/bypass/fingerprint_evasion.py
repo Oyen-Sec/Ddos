@@ -1,6 +1,5 @@
 """
 Advanced Fingerprinting Evasion - 2026
-======================================
 Bypass TLS fingerprinting (JA3/JA4), Canvas, WebGL, Audio Context, and other
 browser fingerprinting techniques used by Cloudflare and modern WAFs.
 """

@@ -1,6 +1,5 @@
 """
 Business Logic Exhaustion - 2026
-=================================
 Target expensive business operations that appear legitimate but exhaust resources.
 Low-volume, high-impact attacks that bypass rate limiting.
 """

@@ -469,9 +469,9 @@ def get_ssl_context_for_profile(profile: str) -> Tuple[ssl.SSLContext, str]:
     return _tls_generator.get_ssl_context(profile)
 
 
-# ============================================================================
+# =
 # HTTP/2 FRAME PADDING & SETTINGS WINDOW RANDOMIZATION
-# ============================================================================
+# =
 
 class H2FrameRandomizer:
     """
@@ -635,9 +635,9 @@ def get_h2_settings(profile: str = "chrome124") -> dict:
     return _h2_randomizer.get_settings_payload(profile)
 
 
-# ============================================================================
+# =
 # NEW CONVENIENCE FUNCTIONS
-# ============================================================================
+# =
 
 def get_combined_fingerprint(profile_name: str) -> Dict[str, Any]:
     """Return dict with TLS + HTTP/2 fingerprint details for a profile."""

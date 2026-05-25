@@ -1,6 +1,5 @@
 """
 Auto Mode v2 - 5-Phase Adaptive Orchestrator
-=============================================
 Total redesign for Windows local environment with:
 
 - Thread isolation: dashboard / health / attack run in separate threads

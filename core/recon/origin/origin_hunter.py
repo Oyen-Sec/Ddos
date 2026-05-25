@@ -1094,9 +1094,9 @@ class OriginHunter:
         except Exception:
             return False
 
-    # =========================================================================
+    # =
     # CLOUDFAIL INTEGRATION - DNSDumpster, Crimeflare, Subdomain Scan
-    # =========================================================================
+    # =
     
     async def _hunt_dnsdumpster(self, host: str) -> List[str]:
         """DNSDumpster.com - Find subdomains and IPs not behind Cloudflare."""
@@ -1497,9 +1497,9 @@ class WafBypassHunter:
         await asyncio.gather(*[verify(c) for c in candidates], return_exceptions=True)
         return candidates
 
-    # =========================================================================
+    # =
     # CLOUDFAIL INTEGRATION - DNSDumpster, Crimeflare, Subdomain Scan
-    # =========================================================================
+    # =
     
     async def _hunt_dnsdumpster(self, host: str) -> List[str]:
         """DNSDumpster.com - Find subdomains and IPs not behind Cloudflare."""

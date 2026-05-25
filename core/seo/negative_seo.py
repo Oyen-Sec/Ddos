@@ -1,6 +1,5 @@
 """
 SEO Attack Module - 2026
-========================
 Advanced negative SEO techniques for competitor manipulation.
 Includes GSC (Google Search Console) spam, backlink poisoning,
 and search result manipulation.

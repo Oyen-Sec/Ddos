@@ -1,6 +1,5 @@
 """
 Multi-Vector Attack Engine v2.0
-================================
 Concurrent attack execution with multiple vectors:
 - Connection exhaustion
 - Resource-intensive payloads

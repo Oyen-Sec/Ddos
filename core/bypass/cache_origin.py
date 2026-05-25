@@ -1,6 +1,5 @@
 """
 Cache Poisoning & Origin Discovery - 2026
-=========================================
 Advanced techniques for CDN cache manipulation and origin server discovery.
 """
 import asyncio

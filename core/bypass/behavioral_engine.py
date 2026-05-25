@@ -1,6 +1,5 @@
 """
 Advanced Behavioral Mimicry Engine - 2026
-==========================================
 AI-driven human behavior simulation for WAF/CDN bypass.
 
 Features:

@@ -184,9 +184,9 @@ SEC_CH_UA_PLATFORMS = ['"Windows"', '"macOS"', '"Linux"', '"Android"', '"iOS"']
 SEC_CH_UA_MODELS = ['""', '"X86"', '"ARM"']
 
 
-# ============================================================================
+# =
 # UTILITY FUNCTIONS
-# ============================================================================
+# =
 
 def buildblock(size: int = None) -> str:
     """HULK-style random string for cache-busting"""
@@ -275,9 +275,9 @@ def build_random_headers(url: str, method: str = "GET") -> dict:
     return headers
 
 
-# ============================================================================
+# =
 # SESSION POOL WITH OPTIMIZATION
-# ============================================================================
+# =
 
 class OptimizedSessionPool:
     """
@@ -344,9 +344,9 @@ class OptimizedSessionPool:
         self._sessions.clear()
 
 
-# ============================================================================
+# =
 # ATTACK METHODS
-# ============================================================================
+# =
 
 async def attack_get_flood(url: str, proxy: Optional[str], session_pool: OptimizedSessionPool,
                            duration: float, target_rps: int,
@@ -1243,9 +1243,9 @@ async def attack_graphql(url: str, proxy: Optional[str], session_pool: Optimized
     return metrics
 
 
-# ============================================================================
+# =
 # ADDITIONAL ATTACK METHODS
-# ============================================================================
+# =
 
 async def attack_headers_flood(url: str, proxy: Optional[str], session_pool: OptimizedSessionPool,
                                duration: float, target_rps: int) -> Dict:
@@ -1497,9 +1497,9 @@ async def attack_http2_flood(url: str, proxy: Optional[str], session_pool: Optim
     return metrics
 
 
-# ============================================================================
+# =
 # ATTACK METHOD REGISTRY
-# ============================================================================
+# =
 
 ATTACK_METHODS = {
     "http_get_flood": attack_get_flood,
@@ -1523,9 +1523,9 @@ ATTACK_METHODS = {
 }
 
 
-# ============================================================================
+# =
 # WORKER MANAGER
-# ============================================================================
+# =
 
 async def run_enhanced_attack(url: str, duration: int, method: str = "http_get_flood",
                               rps: int = 100, proxy: Optional[str] = None,

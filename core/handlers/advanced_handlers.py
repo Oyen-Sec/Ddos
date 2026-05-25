@@ -1,6 +1,5 @@
 """
 Advanced Attack Handlers - 2026
-===============================
 Menu handlers for new advanced attack modules.
 """
 import asyncio
