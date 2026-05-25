@@ -1,26 +1,98 @@
 {
-  "target": "https://gacor88top.bond/",
-  "host": "gacor88top.bond",
-  "timestamp": 1779589538.982878,
-  "timestamp_human": "2026-05-24 09:25:38",
+  "target": "https://agenhokigass.space/",
+  "host": "agenhokigass.space",
+  "timestamp": 1779697149.131709,
+  "timestamp_human": "2026-05-25 15:19:09",
   "verified_origins": [],
   "candidates": [
     {
-      "ip": "43.173.57.48",
-      "confidence": 8.55000000000001,
-      "source": "subdomain",
+      "ip": "1.2.1.1",
+      "confidence": 0.3,
+      "source": "viewdns",
       "verified": false,
       "response_match": false,
       "response_status": 0,
       "server": ""
     },
     {
-      "ip": "188.114.97.1",
+      "ip": "1.0.1.1",
       "confidence": 0.3,
-      "source": "hackertarget",
+      "source": "viewdns",
       "verified": false,
       "response_match": false,
       "response_status": 0,
+      "server": ""
+    },
+    {
+      "ip": "45.0.0.0",
+      "confidence": 0.3,
+      "source": "netcraft",
+      "verified": false,
+      "response_match": false,
+      "response_status": 0,
+      "server": ""
+    },
+    {
+      "ip": "45.207.255.255",
+      "confidence": 0.3,
+      "source": "netcraft",
+      "verified": false,
+      "response_match": false,
+      "response_status": 0,
+      "server": ""
+    },
+    {
+      "ip": "45.192.0.0",
+      "confidence": 0.3,
+      "source": "netcraft",
+      "verified": false,
+      "response_match": false,
+      "response_status": 0,
+      "server": ""
+    },
+    {
+      "ip": "45.255.255.255",
+      "confidence": 0.3,
+      "source": "netcraft",
+      "verified": false,
+      "response_match": false,
+      "response_status": 0,
+      "server": ""
+    },
+    {
+      "ip": "45.194.53.26",
+      "confidence": 0.0,
+      "source": "hackertarget+subdomain+urlscan+certspotter+health_endpoints+xforwarded_bypass+cdn_misconfig+subdomain_bruteforce+ipinfo",
+      "verified": false,
+      "response_match": false,
+      "response_status": 301,
+      "server": ""
+    },
+    {
+      "ip": "45.194.53.52",
+      "confidence": 0.0,
+      "source": "hackertarget+subdomain+urlscan+cdn_misconfig+subdomain_bruteforce+netcraft",
+      "verified": false,
+      "response_match": false,
+      "response_status": 301,
+      "server": ""
+    },
+    {
+      "ip": "45.194.53.0",
+      "confidence": 0.0,
+      "source": "netcraft",
+      "verified": false,
+      "response_match": false,
+      "response_status": 301,
+      "server": ""
+    },
+    {
+      "ip": "45.194.53.255",
+      "confidence": 0.0,
+      "source": "netcraft",
+      "verified": false,
+      "response_match": false,
+      "response_status": 301,
       "server": ""
     }
   ]
