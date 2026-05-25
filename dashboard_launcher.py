@@ -64,7 +64,7 @@ async def stream_metrics(dashboard, args, attack_metrics_fn):
 
 async def run_attack_cmd(target: str, method: str, duration: int, rps: int, dashboard, args):
     """Run attack and stream metrics chunks."""
-    from core.attack.enhanced import run_enhanced_attack
+    from core.attack.engines.enhanced import run_enhanced_attack
     from core.monitor.dashboard import MetricsSnapshot
 
     if not target.startswith(("http://", "https://", "ws://", "wss://")):
@@ -144,8 +144,8 @@ async def run_seo_scan(target: str, dashboard) -> Dict[str, Any]:
         target = "https://" + target
     await dashboard.broadcast_event("SEO_SCAN", "DASHBOARD", target, "OK")
     try:
-        from core.recon.intel import TargetAnalyzer
-        from core.recon.endpoint import SmartEndpointDiscovery
+        from core.recon.intel.intel import TargetAnalyzer
+        from core.recon.analysis.endpoint import SmartEndpointDiscovery
         ta = TargetAnalyzer()
         prof = ta.analyze(target)
         sd = SmartEndpointDiscovery()
@@ -170,7 +170,7 @@ async def run_find_origin(target: str, dashboard) -> Dict[str, Any]:
         target = "https://" + target
     await dashboard.broadcast_event("FIND_ORIGIN", "DASHBOARD", target, "OK")
     try:
-        from core.recon.origin_finder import OriginFinder
+        from core.recon.origin.origin_finder import OriginFinder
         finder = OriginFinder()
         report = finder.find_origin(target)
         result = {

