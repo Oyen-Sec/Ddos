@@ -35,16 +35,16 @@ from rich import box
 
 _RICH_CONSOLE = Console()
 
-from core.attack.multi_vector_engine import (
+from core.attack.engines.multi_vector_engine import (
     run_multi_vector_engine,
 )
-from core.attack.raw_http_engine import (
+from core.attack.engines.raw_http_engine import (
     EngineMetrics,
     ping_target_rtt,
     quick_throughput_probe,
     run_worker_in_thread,
 )
-from core.attack.proxy_amplifier import (
+from core.attack.specialized.proxy_amplifier import (
     SmartProxyRotator,
     extract_proxy_urls,
     run_amplifier_in_thread,

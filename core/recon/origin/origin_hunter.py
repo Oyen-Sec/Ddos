@@ -215,7 +215,7 @@ class OriginHunter:
 
         # Auto-save to origin store
         try:
-            from core.recon.origin_store import save_hunt
+            from core.recon.origin.origin_store import save_hunt
             cands_serializable = []
             for c in report.candidates:
                 cands_serializable.append({
@@ -948,7 +948,7 @@ class OriginHunter:
         Uses HTTP/HTTPS probe with Host header, CF detection, content hash verification.
         """
         try:
-            from core.recon.origin_verifier import OriginVerifier
+            from core.recon.origin.origin_verifier import OriginVerifier
             
             verifier = OriginVerifier(timeout=self.timeout)
             
@@ -1058,7 +1058,7 @@ class OriginHunter:
         """Check if IP belongs to CDN (Cloudflare, Akamai, etc) using official ranges."""
         # Use official Cloudflare IP range checker
         try:
-            from core.recon.cf_ranges import is_cloudflare_ip
+            from core.recon.filters.cf_ranges import is_cloudflare_ip
             if is_cloudflare_ip(ip):
                 return True
         except Exception as e:

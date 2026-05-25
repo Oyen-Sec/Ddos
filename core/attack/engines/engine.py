@@ -143,7 +143,7 @@ class AttackEngine:
         self.metrics.status = "STOPPED"
 
     async def _run_python_engine(self, url: str, duration: int, method: str, rps: int):
-        from core.attack.enhanced import run_enhanced_attack
+        from core.attack.engines.enhanced import run_enhanced_attack
 
         proxy_url = None
         if self.proxy_pool and not self.no_proxy:

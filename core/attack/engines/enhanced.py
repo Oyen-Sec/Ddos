@@ -9,7 +9,7 @@ import logging
 import errno
 from typing import Optional, List, Dict, Tuple
 from urllib.parse import urlparse, urlencode
-from core.attack.adaptive import AdaptiveController
+from core.attack.strategies.adaptive import AdaptiveController
 from core.monitor.metrics import MetricsCollector
 from core.network.tls_fingerprint import get_random_ssl_context
 from core.network.header_mutation import get_mutated_headers
@@ -364,7 +364,7 @@ async def attack_get_flood(url: str, proxy: Optional[str], session_pool: Optimiz
     # Use high-perf engine for high RPS
     if target_rps >= 500:
         try:
-            from core.attack.highperf_engine import smart_flood
+            from core.attack.engines.highperf_engine import smart_flood
             result = await smart_flood(url, duration, target_rps, proxy_url=proxy)
             if metrics_out is not None and isinstance(result, dict):
                 for k, v in result.items():

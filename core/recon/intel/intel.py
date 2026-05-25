@@ -166,7 +166,7 @@ class TargetAnalyzer:
     def discover_origin_advanced(self, url: str, censys_id: str = None, censys_secret: str = None,
                                   shodan_key: str = None, securitytrails_key: str = None):
         """Use OriginFinder for comprehensive origin IP discovery"""
-        from core.recon.origin_finder import OriginFinder
+        from core.recon.origin.origin_finder import OriginFinder
         finder = OriginFinder(timeout=self.timeout)
         parsed = urlparse(url)
         domain = parsed.hostname or url

@@ -63,7 +63,7 @@ class OriginVerifier:
         """Lazy load CDN filter."""
         if self._cdn_filter is None:
             try:
-                from core.recon.cdn_ranges import get_cdn_filter
+                from core.recon.filters.cdn_ranges import get_cdn_filter
                 self._cdn_filter = get_cdn_filter()
             except Exception as e:
                 logger.warning(f"CDN filter not available: {e}")
