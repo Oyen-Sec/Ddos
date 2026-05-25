@@ -1,10 +1,12 @@
 """
-Origin IP Verifier v7.0
-Live verification pipeline untuk kandidat origin IP
-- HTTP/HTTPS probe dengan Host header
-- Response analysis (CF detection, redirect, challenge page)
-- Content hash verification
-- SSL certificate check
+Origin IP Verifier v8.0
+Enhanced live verification pipeline untuk kandidat origin IP
+- Multi-path probe (/, /robots.txt, /favicon.ico)
+- Multi-point content hash comparison
+- Server header fingerprint analysis
+- Shared hosting detection (PTR/reverse DNS)
+- CDN IP range filtering (Cloudflare, Akamai, Fastly, Gcore, CDN77, Alibaba)
+- Anti false positive mechanisms
 """
 import asyncio
 import hashlib
@@ -35,11 +37,19 @@ class VerificationResult:
     https_status: int = 0
     server_header: str = ""
     body_hash: str = ""
+    body_hash_robots: str = ""
+    body_hash_favicon: str = ""
     ssl_cn: str = ""
     has_cf_headers: bool = False
     is_redirect: bool = False
     is_challenge_page: bool = False
+    is_cdn_ip: bool = False
+    cdn_provider: str = ""
+    is_shared_hosting: bool = False
+    ptr_record: str = ""
     response_time_ms: float = 0.0
+    verification_method: str = ""
+    hash_match_count: int = 0
 
 
 class OriginVerifier:
@@ -47,56 +57,122 @@ class OriginVerifier:
     
     def __init__(self, timeout: int = 10):
         self.timeout = timeout
+        self._cdn_filter = None
+    
+    def _get_cdn_filter(self):
+        """Lazy load CDN filter."""
+        if self._cdn_filter is None:
+            try:
+                from core.recon.cdn_ranges import get_cdn_filter
+                self._cdn_filter = get_cdn_filter()
+            except Exception as e:
+                logger.warning(f"CDN filter not available: {e}")
+        return self._cdn_filter
     
     async def verify_candidate(
         self,
         ip: str,
         target_domain: str,
-        baseline_hash: Optional[str] = None
+        baseline_hash: Optional[str] = None,
+        baseline_hash_robots: Optional[str] = None,
+        baseline_hash_favicon: Optional[str] = None
     ) -> VerificationResult:
         """
-        Verify single IP candidate.
+        Verify single IP candidate with enhanced multi-path verification.
         
         Args:
             ip: Candidate IP address
             target_domain: Target domain (for Host header)
-            baseline_hash: Expected content hash from real domain
+            baseline_hash: Expected content hash from real domain (/)
+            baseline_hash_robots: Expected hash for /robots.txt
+            baseline_hash_favicon: Expected hash for /favicon.ico
         
         Returns:
             VerificationResult with verification status
         """
         result = VerificationResult(ip=ip)
+        import time
+        start_time = time.time()
         
-        # Step 1: HTTP probe
-        http_ok, http_status, http_body, http_headers = await self._probe_http(
-            ip, target_domain, use_https=False
-        )
-        result.http_status = http_status
+        # Step 0: Check if IP is in CDN range
+        cdn_filter = self._get_cdn_filter()
+        if cdn_filter:
+            is_cdn, provider = cdn_filter.is_cdn_ip(ip)
+            if is_cdn:
+                result.is_cdn_ip = True
+                result.cdn_provider = provider
+                result.reason = f"CDN IP detected ({provider.upper()} range)"
+                return result
         
-        # Step 2: HTTPS probe
-        https_ok, https_status, https_body, https_headers, ssl_cn = await self._probe_https(
-            ip, target_domain
-        )
-        result.https_status = https_status
+        # Step 0.5: Check PTR/reverse DNS for shared hosting
+        ptr_record = await self._get_ptr_record(ip)
+        result.ptr_record = ptr_record
+        
+        if ptr_record:
+            is_shared = self._is_shared_hosting_ptr(ptr_record)
+            result.is_shared_hosting = is_shared
+            if is_shared:
+                result.reason = f"Shared hosting detected (PTR: {ptr_record})"
+                # Don't return yet, continue verification but flag it
+        
+        # Step 1: Multi-path HTTP probe
+        paths = ['/', '/robots.txt', '/favicon.ico']
+        http_results = {}
+        
+        for path in paths:
+            http_ok, http_status, http_body, http_headers = await self._probe_http(
+                ip, target_domain, path=path, use_https=False
+            )
+            http_results[path] = {
+                'ok': http_ok,
+                'status': http_status,
+                'body': http_body,
+                'headers': http_headers
+            }
+        
+        result.http_status = http_results['/']['status']
+        
+        # Step 2: Multi-path HTTPS probe
+        https_results = {}
+        ssl_cn = ""
+        
+        for path in paths:
+            https_ok, https_status, https_body, https_headers, cn = await self._probe_https(
+                ip, target_domain, path=path
+            )
+            https_results[path] = {
+                'ok': https_ok,
+                'status': https_status,
+                'body': https_body,
+                'headers': https_headers
+            }
+            if cn and not ssl_cn:
+                ssl_cn = cn
+        
+        result.https_status = https_results['/']['status']
         result.ssl_cn = ssl_cn
         
         # Use HTTPS response if available, fallback to HTTP
-        if https_ok and https_body:
-            status = https_status
-            body = https_body
-            headers = https_headers
-        elif http_ok and http_body:
-            status = http_status
-            body = http_body
-            headers = http_headers
+        if https_results['/']['ok'] and https_results['/']['body']:
+            primary_result = https_results['/']
+            protocol = "HTTPS"
+        elif http_results['/']['ok'] and http_results['/']['body']:
+            primary_result = http_results['/']
+            protocol = "HTTP"
         else:
             result.reason = "No valid HTTP/HTTPS response"
+            result.response_time_ms = (time.time() - start_time) * 1000
             return result
+        
+        status = primary_result['status']
+        body = primary_result['body']
+        headers = primary_result['headers']
         
         # Step 3: Check for Cloudflare headers
         result.has_cf_headers = self._has_cloudflare_headers(headers)
         if result.has_cf_headers:
             result.reason = "Cloudflare headers detected (cf-ray, cf-cache-status)"
+            result.response_time_ms = (time.time() - start_time) * 1000
             return result
         
         # Step 4: Check for redirect
@@ -104,47 +180,113 @@ class OriginVerifier:
             location = headers.get('location', '')
             result.is_redirect = True
             result.reason = f"Redirect {status} to {location}"
+            result.response_time_ms = (time.time() - start_time) * 1000
             return result
         
         # Step 5: Check for challenge page
         result.is_challenge_page = self._is_challenge_page(body)
         if result.is_challenge_page:
             result.reason = "Cloudflare challenge page detected"
+            result.response_time_ms = (time.time() - start_time) * 1000
             return result
         
         # Step 6: Extract server header
         result.server_header = headers.get('server', 'unknown')
         
-        # Step 7: Content hash verification
+        # Step 7: Multi-point content hash verification
+        hash_matches = 0
+        
+        # Hash homepage
         if body:
             result.body_hash = hashlib.sha256(body.encode('utf-8', errors='ignore')).hexdigest()[:16]
-            
-            if baseline_hash:
-                if result.body_hash == baseline_hash:
-                    result.is_verified = True
-                    result.reason = f"VERIFIED: Content hash match ({result.server_header})"
-                else:
-                    result.reason = f"Content hash mismatch (expected {baseline_hash[:8]}..., got {result.body_hash[:8]}...)"
-            else:
-                # No baseline to compare, but got valid response
-                if status == 200:
-                    result.is_verified = True
-                    result.reason = f"HTTP {status} OK, server: {result.server_header}"
-                else:
-                    result.reason = f"HTTP {status}, no baseline hash to verify"
-        else:
-            result.reason = "Empty response body"
+            if baseline_hash and result.body_hash == baseline_hash:
+                hash_matches += 1
         
+        # Hash robots.txt
+        robots_body = https_results['/robots.txt']['body'] or http_results['/robots.txt']['body']
+        if robots_body:
+            result.body_hash_robots = hashlib.sha256(robots_body.encode('utf-8', errors='ignore')).hexdigest()[:16]
+            if baseline_hash_robots and result.body_hash_robots == baseline_hash_robots:
+                hash_matches += 1
+        
+        # Hash favicon.ico
+        favicon_body = https_results['/favicon.ico']['body'] or http_results['/favicon.ico']['body']
+        if favicon_body:
+            result.body_hash_favicon = hashlib.sha256(favicon_body.encode('utf-8', errors='ignore')).hexdigest()[:16]
+            if baseline_hash_favicon and result.body_hash_favicon == baseline_hash_favicon:
+                hash_matches += 1
+        
+        result.hash_match_count = hash_matches
+        
+        # Step 8: Verification decision
+        if hash_matches >= 2:
+            # At least 2 out of 3 hashes match - VERIFIED
+            result.is_verified = True
+            result.verification_method = f"Multi-point hash match ({hash_matches}/3)"
+            result.reason = f"VERIFIED: {hash_matches}/3 content hashes match | {protocol} {status} | {result.server_header}"
+        elif hash_matches == 1:
+            # Only 1 hash matches - SUSPICIOUS but possible
+            result.is_verified = True
+            result.verification_method = f"Single hash match ({hash_matches}/3)"
+            result.reason = f"VERIFIED (partial): {hash_matches}/3 hash match | {protocol} {status} | {result.server_header}"
+        elif baseline_hash or baseline_hash_robots or baseline_hash_favicon:
+            # Baseline provided but no match
+            result.reason = f"Content hash mismatch (0/3 matches) | Expected vs Got: {baseline_hash[:8] if baseline_hash else 'N/A'}... vs {result.body_hash[:8]}..."
+        else:
+            # No baseline to compare, but got valid response
+            if status == 200:
+                result.is_verified = True
+                result.verification_method = "HTTP 200 OK (no baseline)"
+                result.reason = f"HTTP {status} OK | {protocol} | {result.server_header}"
+            else:
+                result.reason = f"HTTP {status} | No baseline hash to verify"
+        
+        result.response_time_ms = (time.time() - start_time) * 1000
         return result
+    
+    async def _get_ptr_record(self, ip: str) -> str:
+        """Get PTR (reverse DNS) record for IP."""
+        try:
+            loop = asyncio.get_event_loop()
+            ptr = await loop.run_in_executor(None, socket.gethostbyaddr, ip)
+            return ptr[0] if ptr else ""
+        except Exception as e:
+            logger.debug(f"PTR lookup failed for {ip}: {e}")
+            return ""
+    
+    def _is_shared_hosting_ptr(self, ptr: str) -> bool:
+        """Check if PTR indicates shared hosting."""
+        ptr_lower = ptr.lower()
+        
+        # Known shared hosting providers
+        shared_indicators = [
+            'hostinger', 'namecheap', 'bluehost', 'godaddy', 'dreamhost',
+            'siteground', 'hostgator', 'a2hosting', 'inmotion',
+            'shared', 'cpanel', 'plesk', 'whm',
+            'webhosting', 'hosting', 'vps', 'cloud'
+        ]
+        
+        for indicator in shared_indicators:
+            if indicator in ptr_lower:
+                return True
+        
+        return False
     
     async def _probe_http(
         self,
         ip: str,
         host: str,
+        path: str = '/',
         use_https: bool = False
     ) -> Tuple[bool, int, str, Dict[str, str]]:
         """
         Probe IP with HTTP/HTTPS request using Host header.
+        
+        Args:
+            ip: IP address to probe
+            host: Host header value
+            path: URL path to request
+            use_https: Use HTTPS instead of HTTP
         
         Returns:
             (success, status_code, body, headers)
@@ -153,7 +295,7 @@ class OriginVerifier:
             import aiohttp
             
             scheme = "https" if use_https else "http"
-            url = f"{scheme}://{ip}/"
+            url = f"{scheme}://{ip}{path}"
             
             # Use custom connector to bypass SSL verification
             connector = aiohttp.TCPConnector(ssl=False, force_close=True)
@@ -175,19 +317,25 @@ class OriginVerifier:
                     return True, status, body, resp_headers
         
         except asyncio.TimeoutError:
-            logger.debug(f"Timeout probing {ip}")
+            logger.debug(f"Timeout probing {ip}{path}")
             return False, 0, "", {}
         except Exception as e:
-            logger.debug(f"Error probing {ip}: {e}")
+            logger.debug(f"Error probing {ip}{path}: {e}")
             return False, 0, "", {}
     
     async def _probe_https(
         self,
         ip: str,
-        host: str
+        host: str,
+        path: str = '/'
     ) -> Tuple[bool, int, str, Dict[str, str], str]:
         """
         Probe IP with HTTPS and extract SSL CN.
+        
+        Args:
+            ip: IP address to probe
+            host: Host header value
+            path: URL path to request
         
         Returns:
             (success, status_code, body, headers, ssl_cn)
@@ -196,7 +344,7 @@ class OriginVerifier:
         ssl_cn = await self._get_ssl_cn(ip, host)
         
         # Then do HTTP probe
-        success, status, body, headers = await self._probe_http(ip, host, use_https=True)
+        success, status, body, headers = await self._probe_http(ip, host, path=path, use_https=True)
         
         return success, status, body, headers, ssl_cn
     
@@ -245,6 +393,8 @@ class OriginVerifier:
         candidates: List[str],
         target_domain: str,
         baseline_hash: Optional[str] = None,
+        baseline_hash_robots: Optional[str] = None,
+        baseline_hash_favicon: Optional[str] = None,
         max_concurrent: int = 10
     ) -> List[VerificationResult]:
         """
@@ -253,7 +403,9 @@ class OriginVerifier:
         Args:
             candidates: List of IP addresses
             target_domain: Target domain
-            baseline_hash: Expected content hash
+            baseline_hash: Expected content hash (/)
+            baseline_hash_robots: Expected hash (/robots.txt)
+            baseline_hash_favicon: Expected hash (/favicon.ico)
             max_concurrent: Max concurrent verifications
         
         Returns:
@@ -263,7 +415,10 @@ class OriginVerifier:
         
         async def verify_with_sem(ip: str):
             async with sem:
-                return await self.verify_candidate(ip, target_domain, baseline_hash)
+                return await self.verify_candidate(
+                    ip, target_domain, baseline_hash, 
+                    baseline_hash_robots, baseline_hash_favicon
+                )
         
         tasks = [verify_with_sem(ip) for ip in candidates]
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -317,3 +472,36 @@ async def get_baseline_hash(target_url: str, use_flaresolverr: bool = False) -> 
     except Exception as e:
         logger.error(f"Failed to get baseline hash: {e}")
         return None
+
+
+async def get_baseline_hashes(
+    target_domain: str, 
+    use_flaresolverr: bool = False
+) -> Dict[str, Optional[str]]:
+    """
+    Get baseline content hashes for multiple paths.
+    
+    Args:
+        target_domain: Target domain
+        use_flaresolverr: Use FlareSolverr for CF bypass
+    
+    Returns:
+        Dict with keys: 'homepage', 'robots', 'favicon'
+    """
+    paths = {
+        'homepage': f'https://{target_domain}/',
+        'robots': f'https://{target_domain}/robots.txt',
+        'favicon': f'https://{target_domain}/favicon.ico'
+    }
+    
+    hashes = {}
+    
+    for key, url in paths.items():
+        try:
+            hash_val = await get_baseline_hash(url, use_flaresolverr)
+            hashes[key] = hash_val
+        except Exception as e:
+            logger.debug(f"Failed to get baseline hash for {key}: {e}")
+            hashes[key] = None
+    
+    return hashes

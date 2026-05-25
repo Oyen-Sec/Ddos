@@ -1,0 +1,110 @@
+# Sustained Attack Configuration v8.0
+# Parameters for sustained attack mechanisms
+
+# Multi-Vector Rotation
+vector_rotation:
+  enabled: true
+  rotation_interval: 60  # seconds between vector changes
+  vectors:
+    - name: http_flood
+      duration: 60
+      connections_per_ip: 50
+      request_rate: 10.0
+      description: "Normal GET requests with random query strings"
+    
+    - name: http2_flood
+      duration: 60
+      connections_per_ip: 30
+      request_rate: 5.0
+      description: "HTTP/2 multiplexing with 100 parallel streams"
+    
+    - name: slowloris
+      duration: 60
+      connections_per_ip: 25
+      request_rate: 0.067  # 1 request per 15 seconds
+      description: "Slow header attack, connection hold 300s"
+    
+    - name: post_bomb
+      duration: 60
+      connections_per_ip: 20
+      request_rate: 0.5
+      payload_size: 52428800  # 50MB
+      description: "Large multipart upload, CPU exhaust"
+    
+    - name: websocket_storm
+      duration: 60
+      connections_per_ip: 40
+      request_rate: 2.0
+      description: "WebSocket upgrade requests, connection hold"
+    
+    - name: cache_poison
+      duration: 60
+      connections_per_ip: 35
+      request_rate: 8.0
+      description: "X-Forwarded-Host manipulation"
+
+# Low-Slow Attack
+low_slow:
+  enabled: true
+  connection_limit: 25  # Below typical 30 conn/IP threshold
+  request_interval: 15  # Seconds between requests per connection
+  connection_hold: 600  # Seconds to hold connection (10 minutes)
+  total_duration: 3600  # Total attack duration (1 hour)
+
+# Connection Decoupling Attack
+connection_decoupling:
+  enabled: true
+  large_file_path: "/large-file.zip"
+  target_file_size: 10485760  # 10MB
+  num_requests: 100
+  amplification_factor: 40000  # Expected amplification
+
+# HEAD Bomb Attack
+head_bomb:
+  enabled: true
+  large_file_path: "/large-file.zip"
+  num_requests: 100
+  cache_bypass: true
+
+# Distributed Botnet Simulation
+distributed_botnet:
+  enabled: true
+  attack_duration: 3600  # 1 hour
+  requests_per_proxy: 100
+  geo_distribution:
+    US: 200
+    EU: 200
+    ASIA: 200
+    SA: 150
+    AF: 150
+    OC: 100
+
+# General Settings
+general:
+  max_concurrent_attacks: 3  # Run multiple attack types simultaneously
+  auto_rotate_proxies: true
+  proxy_failure_threshold: 10  # Deactivate proxy after N failures
+  request_timeout: 30  # seconds
+  connection_timeout: 30  # seconds
+
+# Rate Limiting Bypass
+rate_limit_bypass:
+  enabled: true
+  stay_below_threshold: true
+  threshold_percentage: 0.83  # Use 83% of detected limit (e.g., 25 of 30)
+  adaptive_throttling: true  # Slow down if 429/503 detected
+
+# Anti-Detection
+anti_detection:
+  randomize_user_agents: true
+  randomize_headers: true
+  vary_request_timing: true
+  timing_jitter_ms: 500  # +/- random jitter
+  rotate_tls_fingerprints: true
+
+# Logging
+logging:
+  level: INFO  # DEBUG, INFO, WARNING, ERROR
+  log_file: "logs/sustained_attack.log"
+  log_stats_interval: 60  # seconds
+  verbose_output: false

