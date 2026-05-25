@@ -77,37 +77,8 @@ def check_flaresolverr():
                 return True, endpoint
     except Exception:
         pass
-    # Try to auto-start via docker-compose
-    compose_path = "docker-compose.yml"
-    if os.path.exists(compose_path):
-        try:
-            print(f" {c('y','[*]')} FlareSolverr not running. Attempting auto-start via docker-compose...")
-            subprocess.run(
-                ["docker-compose", "up", "-d", "flaresolverr"],
-                capture_output=True, timeout=30, check=False
-            )
-            import time as _t
-            _t.sleep(5)
-            with urlopen(req, timeout=5) as resp:
-                if resp.status == 200:
-                    print(f" {c('g','[+]')} FlareSolverr started successfully: {endpoint}")
-                    return True, endpoint
-        except Exception as e:
-            print(f" {c('y','[!]')} Auto-start failed: {e}")
-    print(f" {c('y','[!]')} FlareSolverr not available.")
-    print(f" {c('c','[*]')} Install with: docker run -d -p 8191:8191 ghcr.io/flaresolverr/flaresolverr")
-    fs_choice = input(f" {c('c','[*]')} Have FlareSolverr running elsewhere? Enter endpoint URL (or press Enter to skip): ").strip()
-    if fs_choice:
-        try:
-            ep = fs_choice if fs_choice.startswith("http") else f"http://{fs_choice}"
-            req2 = Request(f"{ep}/v1", data=b'{"cmd":"sessions.list"}',
-                          headers={"Content-Type": "application/json"}, method="POST")
-            with urlopen(req2, timeout=5) as resp2:
-                if resp2.status == 200:
-                    print(f" {c('g','[+]')} FlareSolverr connected: {ep}")
-                    return True, ep
-        except Exception:
-            print(f" {c('y','[!]')} Could not connect to {fs_choice}")
+    # Skip FlareSolverr silently - not required for operation
+    print(f" {c('y','[*]')} FlareSolverr not available (optional, skipping)")
     return False, endpoint
 
 def load_bypass_flags(env: dict = None) -> dict:

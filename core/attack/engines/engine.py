@@ -106,7 +106,22 @@ class AttackEngine:
         ]
 
         if self.origin_ip:
-            args.extend(["-origin", self.origin_ip])
+            # Health check origin before using it
+            import socket as _sock
+            _origin_alive = False
+            try:
+                _s = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
+                _s.settimeout(3)
+                _s.connect((self.origin_ip, 443))
+                _s.close()
+                _origin_alive = True
+            except Exception:
+                _origin_alive = False
+            
+            if _origin_alive:
+                args.extend(["-origin", self.origin_ip])
+            else:
+                logger.warning(f"Origin IP {self.origin_ip} is DEAD, attacking via CDN")
 
         self.metrics.status = "RUNNING"
         self._go_process = await asyncio.create_subprocess_exec(

