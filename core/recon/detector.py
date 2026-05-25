@@ -9,6 +9,10 @@ from typing import Dict, Optional
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
+from rich.panel import Panel
+from rich.table import Table
+from rich import box
+
 logger = logging.getLogger("target_detector")
 
 
@@ -513,23 +517,41 @@ class TargetDetector:
 
 def print_profile(profile: TargetProfile, color_func=None):
     """Pretty print target profile"""
-    c = color_func if color_func else lambda t, s: s
-    print(f"\n {c('c','='*70)}")
-    print(f" {c('w','  TARGET INTELLIGENCE REPORT')}")
-    print(f" {c('c','='*70)}")
-    print(f"  Target:           {profile.url}")
-    print(f"  Status:           {profile.response_status} ({c('g','ALIVE') if profile.is_alive else c('r','DEAD')})")
-    print(f"  Response time:    {profile.response_time_ms}ms")
-    print(f"  Server:           {profile.server or 'unknown'}")
-    print(f" {c('d','-'*70)}")
-    print(f"  HTTP/2 support:   {c('g','YES') if profile.supports_http2 else c('y','NO')}")
-    print(f"  HTTP/3 support:   {c('g','YES') if profile.supports_http3 else c('y','NO')}")
-    print(f"  CDN:              {c('y',profile.cdn) if profile.cdn != 'none' else c('g','none')}")
-    print(f"  WAF:              {c('r',profile.waf) if profile.waf != 'none' else c('g','none')}")
-    print(f"  Rate limited:     {c('r','YES') if profile.rate_limited else c('g','NO')}")
-    print(f" {c('d','-'*70)}")
-    print(f"  {c('y','RECOMMENDED METHOD:')}   {c('w',profile.recommended_method.upper())}")
-    print(f"  {c('y','STRATEGY:')}             {c('w',profile.recommended_strategy.upper())}")
-    print(f"  {c('y','NEEDS RAPID RESET:')}    {c('g','YES') if profile.needs_rapid_reset else c('d','no')}")
-    print(f"  {c('y','NEEDS PROXY:')}          {c('g','YES') if profile.needs_proxy else c('d','no')}")
-    print(f" {c('c','='*70)}\n")
+    # Lazy import to avoid circular import
+    try:
+        from main import _RICH_CONSOLE
+        from rich.panel import Panel
+        from rich import box
+    except (ImportError, AttributeError):
+        # Fallback to plain text if Rich import fails
+        c = color_func if color_func else lambda t, s: s
+        print(f"\n {c('c','='*70)}")
+        print(f" {c('w','  TARGET INTELLIGENCE REPORT')}")
+        print(f" {c('c','='*70)}")
+        print(f"  Target:           {profile.url}")
+        print(f"  Status:           {profile.response_status}")
+        print(f"  Recommended:      {profile.recommended_method.upper()}")
+        print(f" {c('c','='*70)}\n")
+        return
+
+    cdn_str = f"[yellow]{profile.cdn}[/]" if profile.cdn != 'none' else "[green]none[/]"
+    waf_str = f"[red]{profile.waf}[/]" if profile.waf != 'none' else "[green]none[/]"
+
+    _RICH_CONSOLE.print()
+    _RICH_CONSOLE.print(Panel(
+        f"[bold white]Target:[/]           {profile.url}\n"
+        f"[bold white]Status:[/]           {profile.response_status} ({'[green]ALIVE[/]' if profile.is_alive else '[red]DEAD[/]'})\n"
+        f"[bold white]Response time:[/]    {profile.response_time_ms}ms\n"
+        f"[bold white]Server:[/]           {profile.server or 'unknown'}\n"
+        f"\n"
+        f"[bold white]HTTP/2 support:[/]   {'[green]YES[/]' if profile.supports_http2 else '[yellow]NO[/]'}\n"
+        f"[bold white]HTTP/3 support:[/]   {'[green]YES[/]' if profile.supports_http3 else '[yellow]NO[/]'}\n"
+        f"[bold white]CDN:[/]              {cdn_str}\n"
+        f"[bold white]WAF:[/]              {waf_str}\n"
+        f"[bold white]Rate limited:[/]     {'[red]YES[/]' if profile.rate_limited else '[green]NO[/]'}\n"
+        f"[bold white]Recommended:[/]      [white]{profile.recommended_method.upper()}[/] / [white]{profile.recommended_strategy.upper()}[/]\n"
+        f"[bold white]Rapid Reset:[/]      {'[green]YES[/]' if profile.needs_rapid_reset else '[dim]no[/]'}\n"
+        f"[bold white]Proxy needed:[/]     {'[green]YES[/]' if profile.needs_proxy else '[dim]no[/]'}",
+        title="[bold cyan]TARGET INTELLIGENCE REPORT[/]",
+        border_style="cyan", box=box.HEAVY
+    ))

