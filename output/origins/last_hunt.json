@@ -1,16 +1,108 @@
 {
-  "target": "https://beranigacor.com/",
+  "target": "https://beranigacor.com",
   "host": "beranigacor.com",
-  "timestamp": 1748224800,
-  "timestamp_human": "2026-05-26 02:00:00",
-  "verified_origins": ["68.178.165.63"],
+  "timestamp": 1779771154.5467765,
+  "timestamp_human": "2026-05-26 11:52:34",
+  "verified_origins": [],
   "candidates": [
     {
+      "ip": "103.155.197.107",
+      "confidence": 4.049999999999999,
+      "source": "subdomain+cdn_misconfig+subdomain_bruteforce",
+      "verified": false,
+      "response_match": false,
+      "response_status": 0,
+      "server": ""
+    },
+    {
+      "ip": "103.181.142.196",
+      "confidence": 3.149999999999999,
+      "source": "subdomain+cdn_misconfig+subdomain_bruteforce",
+      "verified": false,
+      "response_match": false,
+      "response_status": 0,
+      "server": ""
+    },
+    {
+      "ip": "103.173.75.28",
+      "confidence": 2.999999999999999,
+      "source": "subdomain+certspotter+health_endpoints+cdn_misconfig+subdomain_bruteforce+ipinfo",
+      "verified": false,
+      "response_match": false,
+      "response_status": 0,
+      "server": ""
+    },
+    {
       "ip": "68.178.165.63",
-      "source": "manual_verify",
-      "verified": true,
-      "method": "curl --resolve + md5sum content match",
-      "hash": "533290b7ae6e06f44fefce28a355b463"
+      "confidence": 0.44999999999999996,
+      "source": "hackertarget+netcraft",
+      "verified": false,
+      "response_match": false,
+      "response_status": 0,
+      "server": ""
+    },
+    {
+      "ip": "63.165.178.68",
+      "confidence": 0.44999999999999996,
+      "source": "hackertarget+netcraft",
+      "verified": false,
+      "response_match": false,
+      "response_status": 0,
+      "server": ""
+    },
+    {
+      "ip": "1.2.1.1",
+      "confidence": 0.3,
+      "source": "viewdns",
+      "verified": false,
+      "response_match": false,
+      "response_status": 0,
+      "server": ""
+    },
+    {
+      "ip": "1.0.1.1",
+      "confidence": 0.3,
+      "source": "viewdns",
+      "verified": false,
+      "response_match": false,
+      "response_status": 0,
+      "server": ""
+    },
+    {
+      "ip": "68.178.255.255",
+      "confidence": 0.3,
+      "source": "netcraft",
+      "verified": false,
+      "response_match": false,
+      "response_status": 0,
+      "server": ""
+    },
+    {
+      "ip": "68.255.255.255",
+      "confidence": 0.3,
+      "source": "netcraft",
+      "verified": false,
+      "response_match": false,
+      "response_status": 0,
+      "server": ""
+    },
+    {
+      "ip": "68.0.0.0",
+      "confidence": 0.3,
+      "source": "netcraft",
+      "verified": false,
+      "response_match": false,
+      "response_status": 0,
+      "server": ""
+    },
+    {
+      "ip": "68.178.128.0",
+      "confidence": 0.3,
+      "source": "netcraft",
+      "verified": false,
+      "response_match": false,
+      "response_status": 0,
+      "server": ""
     }
   ]
 }
