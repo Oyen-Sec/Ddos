@@ -99,7 +99,8 @@ class SustainedAttackEngine:
         target_port: int = 80,
         use_https: bool = False,
         vector_schedule: Optional[List[VectorConfig]] = None,
-        proxies: Optional[List[str]] = None
+        proxies: Optional[List[str]] = None,
+        max_duration: int = 0,
     ):
         self.target_ip = target_ip
         self.target_domain = target_domain
@@ -107,6 +108,7 @@ class SustainedAttackEngine:
         self.use_https = use_https
         self.vector_schedule = vector_schedule or DEFAULT_VECTOR_SCHEDULE
         self.proxies = proxies or []
+        self.max_duration = max_duration
         self._proxy_idx = 0
         
         self.current_vector_idx = 0
@@ -137,6 +139,13 @@ class SustainedAttackEngine:
         
         try:
             while self.is_running:
+                # Check max duration
+                if self.max_duration > 0:
+                    elapsed = time.time() - self.stats['start_time']
+                    if elapsed >= self.max_duration:
+                        logger.info(f"Max duration reached ({self.max_duration}s)")
+                        break
+                
                 # Get current vector
                 vector_config = self.vector_schedule[self.current_vector_idx]
                 self.stats['current_vector'] = vector_config.vector.value
