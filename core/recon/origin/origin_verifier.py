@@ -7,6 +7,8 @@ Enhanced live verification pipeline untuk kandidat origin IP
 - Shared hosting detection (PTR/reverse DNS)
 - CDN IP range filtering (Cloudflare, Akamai, Fastly, Gcore, CDN77, Alibaba)
 - Anti false positive mechanisms
+- Host header reflection test (CDN/proxy detection)
+- STRICT: ANY Cloudflare header = REJECT (not a real origin)
 """
 import asyncio
 import hashlib
@@ -115,6 +117,23 @@ class OriginVerifier:
                 result.reason = f"Shared hosting detected (PTR: {ptr_record})"
                 # Don't return yet, continue verification but flag it
         
+        # Step 0.6: Host header reflection test
+        # A REAL origin should ONLY respond to Host headers it hosts
+        # A CDN/proxy will respond to ANY Host header
+        is_reflection = await self._test_host_header_reflection(ip, target_domain)
+        if is_reflection:
+            result.reason = "Host header reflection detected (server responds to any Host header - CDN/proxy)"
+            result.response_time_ms = (time.time() - start_time) * 1000
+            return result
+        
+        # Step 0.7: Direct IP test - real origin should respond with valid content
+        # when accessed via IP + Host header, AND should NOT have Cloudflare headers
+        direct_ok = await self._test_direct_origin(ip, target_domain)
+        if not direct_ok:
+            result.reason = "Direct IP test failed (not a valid origin server)"
+            result.response_time_ms = (time.time() - start_time) * 1000
+            return result
+        
         # Step 1: Multi-path HTTP probe
         paths = ['/', '/robots.txt', '/favicon.ico']
         http_results = {}
@@ -218,6 +237,24 @@ class OriginVerifier:
         
         result.hash_match_count = hash_matches
         
+        # Step 7.5: STRICT check - even if hash matches, if server is cloudflare, REJECT
+        server_lower = result.server_header.lower()
+        if 'cloudflare' in server_lower or 'cloudfront' in server_lower:
+            result.reason = f"Server is CDN ({result.server_header}) - not a real origin"
+            result.response_time_ms = (time.time() - start_time) * 1000
+            return result
+        
+        # Step 7.6: Check SSL certificate - if CN doesn't match target domain, it's suspicious
+        if result.ssl_cn and target_domain not in result.ssl_cn and f"*.{target_domain.split('.', 1)[-1] if '.' in target_domain else target_domain}" != result.ssl_cn:
+            # SSL CN doesn't match - could be shared hosting or load balancer
+            if result.ssl_cn == ip:  # IP as CN = self-signed, likely origin
+                pass
+            elif not result.ssl_cn:
+                pass
+            else:
+                # Different domain - flag as suspicious but don't auto-reject
+                logger.debug(f"SSL CN mismatch for {ip}: expected {target_domain}, got {result.ssl_cn}")
+        
         # Step 8: Verification decision
         if hash_matches >= 2:
             # At least 2 out of 3 hashes match - VERIFIED
@@ -243,6 +280,93 @@ class OriginVerifier:
         
         result.response_time_ms = (time.time() - start_time) * 1000
         return result
+    
+    async def _test_host_header_reflection(self, ip: str, target_domain: str) -> bool:
+        """
+        Test if server responds to ANY Host header (CDN/proxy behavior).
+        Real origin should ONLY respond to Host headers it hosts.
+        Sends request with fake Host header - if 200 OK with similar content, it's a CDN/proxy.
+        """
+        import random
+        import string
+        
+        fake_host = ''.join(random.choices(string.ascii_lowercase, k=12)) + '.nonexistent.com'
+        
+        try:
+            import aiohttp
+            connector = aiohttp.TCPConnector(ssl=False, force_close=True)
+            timeout = aiohttp.ClientTimeout(total=5)
+            
+            async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+                url = f"http://{ip}/"
+                headers = {'Host': fake_host}
+                async with session.get(url, headers=headers, allow_redirects=False) as resp:
+                    status = resp.status
+                    body = await resp.text()
+                    resp_headers = {k.lower(): v for k, v in resp.headers.items()}
+                    
+                    # If server returns 200 OK to ANY Host header, it's a CDN/proxy
+                    if status == 200 and len(body) > 100:
+                        # Check for CDN headers in reflection response
+                        if self._has_cloudflare_headers(resp_headers):
+                            logger.debug(f"Reflection test: {ip} responds with CF headers to fake host - CDN")
+                            return True
+                        
+                        # If content is too similar to target, it's a proxy
+                        # (A real origin would return default page or error)
+                        logger.debug(f"Reflection test: {ip} returns 200 to fake host - likely CDN/proxy")
+                        return True
+                    
+                    # 404/error = real origin (only responds to domains it knows)
+                    logger.debug(f"Reflection test: {ip} returns {status} to fake host - likely origin")
+                    return False
+                    
+        except Exception as e:
+            logger.debug(f"Reflection test failed for {ip}: {e}")
+            return False
+    
+    async def _test_direct_origin(self, ip: str, target_domain: str) -> bool:
+        """
+        Test if IP is a real origin by checking:
+        1. Server responds with valid HTTP
+        2. Response does NOT have Cloudflare/CDN headers
+        3. Server header is NOT cloudflare
+        """
+        try:
+            import aiohttp
+            connector = aiohttp.TCPConnector(ssl=False, force_close=True)
+            timeout = aiohttp.ClientTimeout(total=5)
+            
+            async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+                # HTTP test
+                url = f"http://{ip}/"
+                headers = {'Host': target_domain}
+                async with session.get(url, headers=headers, allow_redirects=False) as resp:
+                    status = resp.status
+                    body = await resp.text()
+                    resp_headers = {k.lower(): v for k, v in resp.headers.items()}
+                    
+                    server = resp_headers.get('server', '')
+                    
+                    # Check for CDN indicators
+                    has_cf = self._has_cloudflare_headers(resp_headers)
+                    is_cf_server = 'cloudflare' in server.lower()
+                    
+                    if has_cf or is_cf_server:
+                        logger.debug(f"Direct origin test FAILED: {ip} - still behind Cloudflare (server={server})")
+                        return False
+                    
+                    if status in (200, 301, 302, 403, 404) and len(body) > 0:
+                        # Valid origin response (not blocked, not error page)
+                        logger.debug(f"Direct origin test PASSED: {ip} - no CF headers, server={server}")
+                        return True
+                    
+                    logger.debug(f"Direct origin test FAILED: {ip} - invalid response (status={status})")
+                    return False
+                    
+        except Exception as e:
+            logger.debug(f"Direct origin test failed for {ip}: {e}")
+            return False
     
     async def _get_ptr_record(self, ip: str) -> str:
         """Get PTR (reverse DNS) record for IP."""

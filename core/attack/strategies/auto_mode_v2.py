@@ -56,6 +56,11 @@ from core.utils.throttle import (
     build_phase_schedule,
     load_phase_config,
 )
+from core.attack.strategies.cloudflare_bypass import (
+    CloudflareDetector,
+    CFBypassOrchestrator,
+    HTTP2FingerprintBypass,
+)
 
 logger = logging.getLogger("auto_mode_v2")
 
@@ -364,6 +369,29 @@ class AutoModeV2:
         else:
             self.dashboard.set_global_note(f"recon: target_rtt={rtt:.0f}ms OK")
             self.health.report_network_rtt(rtt)
+        
+        # Cloudflare detection
+        cf_detector = CloudflareDetector()
+        cf_result = await cf_detector.detect(self.target)
+        if cf_result.is_cloudflare:
+            note = f"CLOUDFLARE DETECTED ({cf_result.protection_level}) | ray={cf_result.ray_id[:16]}..."
+            self.dashboard.set_global_note(note)
+            logger.warning(f"Target behind Cloudflare: {cf_result.protection_level}")
+            
+            # Try CF bypass via HTTP/2 fingerprint
+            h2 = HTTP2FingerprintBypass()
+            h2_client = await h2.create_http2_session('chrome_120')
+            if h2_client:
+                try:
+                    resp = await h2_client.get(self.target)
+                    headers = {k.lower(): v for k, v in resp.headers.items()}
+                    if 'cf-ray' not in headers:
+                        logger.info("Cloudflare bypassed via HTTP/2 fingerprint")
+                        self.dashboard.set_global_note("CF BYPASSED via HTTP/2 fingerprint")
+                except Exception as e:
+                    logger.debug(f"HTTP/2 CF bypass failed: {e}")
+        else:
+            self.dashboard.set_global_note(f"recon: no Cloudflare detected | rtt={rtt:.0f}ms")
 
         # Wait remainder of phase
         while time.time() - start < p.duration_seconds:
