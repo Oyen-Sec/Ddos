@@ -27,6 +27,10 @@ CF_CHALLENGE_KEYWORDS = [
     'just a moment', 'checking your browser', 'ddos protection by cloudflare',
     'attention required', 'cloudflare', 'ray id', 'cf-ray'
 ]
+CLOUDFRONT_HEADERS = [
+    'x-amz-cf-pop', 'x-amz-cf-id', 'x-amz-cf-protocol-violation',
+    'cloudfront',
+]
 
 
 @dataclass
@@ -187,20 +191,40 @@ class OriginVerifier:
         body = primary_result['body']
         headers = primary_result['headers']
         
-        # Step 3: Check for Cloudflare headers
+        # Step 3: Check for CDN headers (Cloudflare + CloudFront)
         result.has_cf_headers = self._has_cloudflare_headers(headers)
-        if result.has_cf_headers:
-            result.reason = "Cloudflare headers detected (cf-ray, cf-cache-status)"
+        is_cloudfront = self._has_cloudfront_headers(headers)
+        if result.has_cf_headers or is_cloudfront:
+            cdn_name = "Cloudflare" if result.has_cf_headers else "CloudFront"
+            result.reason = f"{cdn_name} headers detected - still behind CDN"
             result.response_time_ms = (time.time() - start_time) * 1000
             return result
         
-        # Step 4: Check for redirect
+        # Step 4: Check for redirect - but allow same-domain redirects (legitimate origin behavior)
         if status in (301, 302, 303, 307, 308):
             location = headers.get('location', '')
-            result.is_redirect = True
-            result.reason = f"Redirect {status} to {location}"
-            result.response_time_ms = (time.time() - start_time) * 1000
-            return result
+            location_lower = location.lower()
+            
+            # Check if redirect goes to same domain or www subdomain
+            is_same_domain = (
+                target_domain in location_lower or
+                f'www.{target_domain}' in location_lower or
+                location_lower.startswith('/') or  # relative redirect
+                location_lower.startswith(f'http://{target_domain}') or
+                location_lower.startswith(f'https://{target_domain}')
+            )
+            
+            if is_same_domain:
+                # Same-domain redirect = origin server behavior (e.g., non-www -> www)
+                # Don't return yet - continue to mark as verified
+                result.is_redirect = True
+                logger.debug(f"Same-domain redirect {status} -> {location} - treating as valid origin")
+            else:
+                # Cross-domain redirect = suspicious (could be CDN or parked domain)
+                result.is_redirect = True
+                result.reason = f"Cross-domain redirect {status} to {location}"
+                result.response_time_ms = (time.time() - start_time) * 1000
+                return result
         
         # Step 5: Check for challenge page
         result.is_challenge_page = self._is_challenge_page(body)
@@ -256,7 +280,13 @@ class OriginVerifier:
                 logger.debug(f"SSL CN mismatch for {ip}: expected {target_domain}, got {result.ssl_cn}")
         
         # Step 8: Verification decision
-        if hash_matches >= 2:
+        if result.is_redirect:
+            # Same-domain redirect = verified origin (e.g., tokyo88.mom -> www.tokyo88.mom)
+            result.is_verified = True
+            result.verification_method = f"Origin redirect ({status})"
+            location = headers.get('location', '')
+            result.reason = f"VERIFIED: Redirect {status} -> {location} | Server: {result.server_header}"
+        elif hash_matches >= 2:
             # At least 2 out of 3 hashes match - VERIFIED
             result.is_verified = True
             result.verification_method = f"Multi-point hash match ({hash_matches}/3)"
@@ -348,12 +378,15 @@ class OriginVerifier:
                     
                     server = resp_headers.get('server', '')
                     
-                    # Check for CDN indicators
+                    # Check for CDN indicators (Cloudflare + CloudFront)
                     has_cf = self._has_cloudflare_headers(resp_headers)
+                    has_cfront = self._has_cloudfront_headers(resp_headers)
                     is_cf_server = 'cloudflare' in server.lower()
+                    is_cfront_server = 'cloudfront' in server.lower()
                     
-                    if has_cf or is_cf_server:
-                        logger.debug(f"Direct origin test FAILED: {ip} - still behind Cloudflare (server={server})")
+                    if has_cf or has_cfront or is_cf_server or is_cfront_server:
+                        cdn_name = "Cloudflare" if (has_cf or is_cf_server) else "CloudFront"
+                        logger.debug(f"Direct origin test FAILED: {ip} - still behind {cdn_name} (server={server})")
                         return False
                     
                     if status in (200, 301, 302, 403, 404) and len(body) > 0:
@@ -501,6 +534,16 @@ class OriginVerifier:
         for key, value in headers.items():
             for cf_indicator in CF_HEADERS:
                 if cf_indicator in key.lower() or cf_indicator in value.lower():
+                    return True
+        return False
+    
+    def _has_cloudfront_headers(self, headers: Dict[str, str]) -> bool:
+        """Check if response has AWS CloudFront headers (CDN/proxy)."""
+        for key, value in headers.items():
+            key_lower = key.lower()
+            value_lower = value.lower()
+            for cf_indicator in CLOUDFRONT_HEADERS:
+                if cf_indicator in key_lower or cf_indicator in value_lower:
                     return True
         return False
     
