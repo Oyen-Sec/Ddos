@@ -111,7 +111,7 @@ class OriginHunter:
 
         env = env or {}
 
-        # Launch ALL hunters in parallel (existing + new + CloudFail)
+        # Launch ALL hunters in parallel (existing + new + CloudFail + 2026 Advanced)
         tasks = [
             self._hunt_crtsh(host),
             self._hunt_hackertarget(host),
@@ -124,6 +124,11 @@ class OriginHunter:
             self._hunt_shodan(host, env.get("SHODAN_KEY")),
             self._hunt_securitytrails(host, env.get("SECURITYTRAILS_KEY")),
             self._hunt_zoomeye(host, env.get("ZOOMEYE_KEY")),
+            # 2026 Advanced platforms
+            self._hunt_fofa(host, env.get("FOFA_KEY")),
+            self._hunt_hunter(host, env.get("HUNTER_KEY")),
+            self._hunt_binaryedge(host, env.get("BINARYEDGE_KEY")),
+            self._hunt_netlas(host, env.get("NETLAS_KEY")),
             # New passive DNS sources
             self._hunt_anubisdb(host),
             self._hunt_rapiddns(host),
@@ -152,6 +157,7 @@ class OriginHunter:
             "crt.sh", "hackertarget", "threatcrowd", "dnshistory",
             "subdomain", "mx", "favicon", "censys", "shodan",
             "securitytrails", "zoomeye",
+            "fofa", "hunter", "binaryedge", "netlas",
             "anubisdb", "rapiddns", "threatminer", "urlscan",
             "wayback", "certspotter", "virustotal",
             "health_endpoints", "acme_validation", "xforwarded_bypass",
@@ -160,7 +166,11 @@ class OriginHunter:
             "ipinfo", "bgpview", "viewdns", "netcraft",
         ]
 
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=45)
+        except asyncio.TimeoutError:
+            logger.warning(f"Origin hunt timed out for {host} after 45s")
+            results = [None] * len(tasks)
 
         for i, r in enumerate(results):
             source_name = source_names[i] if i < len(source_names) else f"source_{i}"
@@ -200,6 +210,27 @@ class OriginHunter:
             await self._verify_candidates(host, report.target_baseline_hash,
                                           report.target_baseline_status,
                                           report.target_baseline_size)
+
+        # FALLBACK 2026: If no candidates found, directly resolve DNS and verify
+        if not self._candidates:
+            logger.info(f"[Fallback] No candidates from sources, trying direct DNS resolution...")
+            try:
+                direct_ips = await self._resolve_batch([host])
+                for ip in direct_ips:
+                    if ip not in self._candidates:
+                        self._candidates[ip] = OriginCandidate(
+                            ip=ip,
+                            confidence=0.5,
+                            source="dns_fallback",
+                            discovery_method="direct_dns_resolution"
+                        )
+                # Verify these direct IPs
+                if self._candidates and report.target_baseline_hash:
+                    await self._verify_candidates(host, report.target_baseline_hash,
+                                                  report.target_baseline_status,
+                                                  report.target_baseline_size)
+            except Exception as e:
+                logger.debug(f"DNS fallback failed: {e}")
 
         # Sort by confidence + verified
         candidates = list(self._candidates.values())
@@ -533,54 +564,120 @@ class OriginHunter:
             return []
 
     async def _hunt_shodan(self, host: str, key: Optional[str]) -> List[str]:
+        """Shodan API - Enhanced 2026 with SSL cert search"""
         if not key:
             return []
+        ips = []
         try:
             from curl_cffi.requests import AsyncSession
-            kwargs = {"impersonate": "chrome120", "timeout": 15}
+            kwargs = {"impersonate": "chrome120", "timeout": 20}
             async with AsyncSession(**kwargs) as sess:
+                # Method 1: Hostname search
                 resp = await sess.get(
                     f"https://api.shodan.io/shodan/host/search?key={key}&query=hostname:{host}",
-                    timeout=15
+                    timeout=20
                 )
-                if resp.status_code != 200:
-                    return []
-                data = resp.json()
-                ips = []
-                for m in data.get("matches", [])[:50]:
-                    ip = m.get("ip_str")
-                    if ip and self._is_valid_ip(ip):
-                        ips.append(ip)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    for m in data.get("matches", [])[:50]:
+                        ip = m.get("ip_str")
+                        if ip and self._is_valid_ip(ip):
+                            ips.append(ip)
+                
+                # Method 2: SSL certificate search (2026 enhancement)
+                resp2 = await sess.get(
+                    f"https://api.shodan.io/shodan/host/search?key={key}&query=ssl.cert.subject.cn:{host}",
+                    timeout=20
+                )
+                if resp2.status_code == 200:
+                    data2 = resp2.json()
+                    for m in data2.get("matches", [])[:50]:
+                        ip = m.get("ip_str")
+                        if ip and self._is_valid_ip(ip) and ip not in ips:
+                            ips.append(ip)
+                
+                # Method 3: HTTP title search
+                resp3 = await sess.get(
+                    f"https://api.shodan.io/shodan/host/search?key={key}&query=http.title:{host}",
+                    timeout=20
+                )
+                if resp3.status_code == 200:
+                    data3 = resp3.json()
+                    for m in data3.get("matches", [])[:30]:
+                        ip = m.get("ip_str")
+                        if ip and self._is_valid_ip(ip) and ip not in ips:
+                            ips.append(ip)
+                
+                logger.info(f"[Shodan] Found {len(ips)} IPs for {host}")
                 return ips
         except Exception as e:
             logger.debug(f"shodan failed: {e}")
-            return []
+            return ips
 
     async def _hunt_securitytrails(self, host: str, key: Optional[str]) -> List[str]:
+        """SecurityTrails API - Enhanced 2026 with multiple endpoints"""
         if not key:
             return []
+        ips = []
         try:
             from curl_cffi.requests import AsyncSession
-            kwargs = {"impersonate": "chrome120", "timeout": 15,
-                      "headers": {"APIKEY": key}}
+            headers = {"APIKEY": key, "Accept": "application/json"}
+            kwargs = {"impersonate": "chrome120", "timeout": 20, "headers": headers}
             async with AsyncSession(**kwargs) as sess:
+                # Method 1: DNS History A records
                 resp = await sess.get(
                     f"https://api.securitytrails.com/v1/history/{host}/dns/a",
-                    timeout=15
+                    timeout=20
                 )
-                if resp.status_code != 200:
-                    return []
-                data = resp.json()
-                ips = []
-                for record in data.get("records", [])[:30]:
-                    for v in record.get("values", []):
-                        ip = v.get("ip", "")
-                        if self._is_valid_ip(ip):
+                if resp.status_code == 200:
+                    data = resp.json()
+                    for record in data.get("records", [])[:50]:
+                        for v in record.get("values", []):
+                            ip = v.get("ip", "")
+                            if self._is_valid_ip(ip):
+                                ips.append(ip)
+                
+                # Method 2: Current DNS records (2026 enhancement)
+                resp2 = await sess.get(
+                    f"https://api.securitytrails.com/v1/domain/{host}",
+                    timeout=20
+                )
+                if resp2.status_code == 200:
+                    data2 = resp2.json()
+                    current_dns = data2.get("current_dns", {})
+                    for a_record in current_dns.get("a", {}).get("values", []):
+                        ip = a_record.get("ip", "")
+                        if self._is_valid_ip(ip) and ip not in ips:
                             ips.append(ip)
+                
+                # Method 3: Subdomains with IPs
+                resp3 = await sess.get(
+                    f"https://api.securitytrails.com/v1/domain/{host}/subdomains",
+                    timeout=20
+                )
+                if resp3.status_code == 200:
+                    data3 = resp3.json()
+                    subdomains = data3.get("subdomains", [])[:30]
+                    for sub in subdomains:
+                        subdomain = f"{sub}.{host}"
+                        # Get DNS for each subdomain
+                        resp_sub = await sess.get(
+                            f"https://api.securitytrails.com/v1/domain/{subdomain}",
+                            timeout=15
+                        )
+                        if resp_sub.status_code == 200:
+                            sub_data = resp_sub.json()
+                            sub_dns = sub_data.get("current_dns", {})
+                            for a_rec in sub_dns.get("a", {}).get("values", []):
+                                ip = a_rec.get("ip", "")
+                                if self._is_valid_ip(ip) and ip not in ips:
+                                    ips.append(ip)
+                
+                logger.info(f"[SecurityTrails] Found {len(ips)} IPs for {host}")
                 return ips
         except Exception as e:
             logger.debug(f"securitytrails failed: {e}")
-            return []
+            return ips
 
     async def _hunt_zoomeye(self, host: str, key: Optional[str]) -> List[str]:
         if not key:
@@ -606,6 +703,108 @@ class OriginHunter:
         except Exception as e:
             logger.debug(f"zoomeye failed: {e}")
             return []
+
+    # ── 2026 Advanced Hunting Methods ──────────────────────────────────────
+
+    async def _hunt_fofa(self, host: str, key: Optional[str]) -> List[str]:
+        """FOFA - Chinese threat intel platform (2026)"""
+        if not key:
+            return []
+        ips = []
+        try:
+            import base64
+            from curl_cffi.requests import AsyncSession
+            # FOFA query: domain="target.com"
+            query = f'domain="{host}"'
+            query_b64 = base64.b64encode(query.encode()).decode()
+            
+            async with AsyncSession(impersonate="chrome120", timeout=20) as sess:
+                resp = await sess.get(
+                    f"https://fofa.info/api/v1/search/all?email={key.split(':')[0]}&key={key.split(':')[1]}&qbase64={query_b64}&size=100",
+                    timeout=20
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    for result in data.get("results", []):
+                        if len(result) > 0:
+                            ip = result[0]
+                            if self._is_valid_ip(ip):
+                                ips.append(ip)
+                logger.info(f"[FOFA] Found {len(ips)} IPs for {host}")
+        except Exception as e:
+            logger.debug(f"fofa failed: {e}")
+        return ips
+
+    async def _hunt_hunter(self, host: str, key: Optional[str]) -> List[str]:
+        """Hunter.io - Advanced domain intelligence (2026)"""
+        if not key:
+            return []
+        ips = []
+        try:
+            from curl_cffi.requests import AsyncSession
+            async with AsyncSession(impersonate="chrome120", timeout=20) as sess:
+                resp = await sess.get(
+                    f"https://api.hunter.how/search?api-key={key}&query=domain={host}&page=1&page_size=100",
+                    timeout=20
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    for item in data.get("data", {}).get("arr", []):
+                        ip = item.get("ip", "")
+                        if self._is_valid_ip(ip):
+                            ips.append(ip)
+                logger.info(f"[Hunter] Found {len(ips)} IPs for {host}")
+        except Exception as e:
+            logger.debug(f"hunter failed: {e}")
+        return ips
+
+    async def _hunt_binaryedge(self, host: str, key: Optional[str]) -> List[str]:
+        """BinaryEdge - Internet scanning platform (2026)"""
+        if not key:
+            return []
+        ips = []
+        try:
+            from curl_cffi.requests import AsyncSession
+            headers = {"X-Key": key}
+            async with AsyncSession(impersonate="chrome120", timeout=20, headers=headers) as sess:
+                resp = await sess.get(
+                    f"https://api.binaryedge.io/v2/query/domains/subdomain/{host}",
+                    timeout=20
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    for event in data.get("events", []):
+                        for record in event.get("A", []):
+                            if self._is_valid_ip(record):
+                                ips.append(record)
+                logger.info(f"[BinaryEdge] Found {len(ips)} IPs for {host}")
+        except Exception as e:
+            logger.debug(f"binaryedge failed: {e}")
+        return ips
+
+    async def _hunt_netlas(self, host: str, key: Optional[str]) -> List[str]:
+        """Netlas.io - Internet asset discovery (2026)"""
+        if not key:
+            return []
+        ips = []
+        try:
+            from curl_cffi.requests import AsyncSession
+            headers = {"X-API-Key": key}
+            async with AsyncSession(impersonate="chrome120", timeout=20, headers=headers) as sess:
+                resp = await sess.get(
+                    f"https://app.netlas.io/api/domains/?q=domain:{host}",
+                    timeout=20
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    for item in data.get("items", []):
+                        for record in item.get("a", []):
+                            if self._is_valid_ip(record):
+                                ips.append(record)
+                logger.info(f"[Netlas] Found {len(ips)} IPs for {host}")
+        except Exception as e:
+            logger.debug(f"netlas failed: {e}")
+        return ips
 
     # ── New Passive DNS Sources ──────────────────────────────────────
 
@@ -1215,11 +1414,12 @@ class OriginHunter:
         """Hunt via ipinfo.io ASN lookup."""
         ips = []
         try:
-            import requests
-            ip = socket.gethostbyname(host)
+            loop = asyncio.get_event_loop()
+            ip = await loop.run_in_executor(None, socket.gethostbyname, host)
             if not self._is_cdn_ip(ip):
                 ips.append(ip)
-            resp = requests.get(f"https://ipinfo.io/{ip}/json", timeout=self.timeout)
+            import requests
+            resp = await loop.run_in_executor(None, lambda: requests.get(f"https://ipinfo.io/{ip}/json", timeout=self.timeout))
             data = resp.json()
             org = data.get('org', '')
             logger.debug(f"ipinfo.io: {host} -> {ip} (ASN: {org})")
@@ -1231,9 +1431,10 @@ class OriginHunter:
         """Hunt via BGPView API."""
         ips = []
         try:
+            loop = asyncio.get_event_loop()
+            ip = await loop.run_in_executor(None, socket.gethostbyname, host)
             import requests
-            ip = socket.gethostbyname(host)
-            resp = requests.get(f"https://api.bgpview.io/ip/{ip}", timeout=self.timeout)
+            resp = await loop.run_in_executor(None, lambda: requests.get(f"https://api.bgpview.io/ip/{ip}", timeout=self.timeout))
             data = resp.json()
             if data.get('status') == 'ok' and not self._is_cdn_ip(ip):
                 ips.append(ip)
