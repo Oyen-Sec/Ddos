@@ -582,23 +582,37 @@ class AutoDashboard:
             max_v = max(history) if history else 1.0
             if max_v < 1.0:
                 max_v = 1.0
-            # Use Unicode block chars if console supports it, else ASCII
-            if self._unicode_ok:
-                blocks = " \u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588"
-            else:
-                blocks = " .:-=+*#@"
-            chart_chars: List[str] = []
+            avg_v = sum(history) / len(history) if history else 0.0
+            cur_v = history[-1] if history else 0.0
+            # Always use Unicode block chars (main.py forces UTF-8 stdout)
+            blocks = " \u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588"
+            # Build colored chart: green=high, yellow=mid, red=low
+            chart_parts: List[str] = []
             for v in history:
-                idx = int((v / max_v) * (len(blocks) - 1))
+                ratio = (v / max_v) if max_v > 0 else 0.0
+                idx = int(ratio * (len(blocks) - 1))
                 idx = max(0, min(len(blocks) - 1, idx))
-                chart_chars.append(blocks[idx])
-            chart_str = "".join(chart_chars)
-            content = Text(
-                f"max={max_v:.0f}rps  {chart_str}",
-                style="cyan",
+                ch = blocks[idx]
+                if ratio >= 0.66:
+                    color = "bright_green"
+                elif ratio >= 0.33:
+                    color = "bright_yellow"
+                else:
+                    color = "bright_red"
+                chart_parts.append(f"[{color}]{ch}[/]")
+            chart_str = "".join(chart_parts)
+            stats_line = (
+                f"[bold cyan]now:[/] [bold bright_green]{cur_v:7.0f}[/] rps   "
+                f"[bold cyan]avg:[/] [bold bright_yellow]{avg_v:7.0f}[/] rps   "
+                f"[bold cyan]max:[/] [bold bright_magenta]{max_v:7.0f}[/] rps"
             )
-        return Panel(content, border_style="bright_black",
-                     title="[bold]RPS TIMELINE (60s)[/]", title_align="left")
+            from rich.console import Group
+            content = Group(
+                Text.from_markup(stats_line),
+                Text.from_markup(chart_str),
+            )
+        return Panel(content, border_style="bright_cyan",
+                     title="[bold cyan]RPS TIMELINE (60s)[/]", title_align="left")
 
     def _render_footer(self, gs: GlobalState, total_sent: int, instant_rps: float) -> Panel:
         elapsed = time.time() - gs.started_at
