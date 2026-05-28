@@ -85,8 +85,11 @@ func Main() {
 		runQUICCryptoExhaust(cfg)
 	case "underminr":
 		runUnderminrBypass(cfg)
+	case "http_flood_enhanced":
+		runHTTPFloodEnhanced(cfg)
 	default:
-		runHTTPFlood(cfg)
+		// Use enhanced version by default for better Cloudflare bypass
+		runHTTPFloodEnhanced(cfg)
 	}
 
 	outputResult()

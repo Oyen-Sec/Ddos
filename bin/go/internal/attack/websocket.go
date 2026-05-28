@@ -59,6 +59,14 @@ func runWebSocketStorm(cfg *AttackConfig) {
 	if maxConns < 1000 {
 		maxConns = 5000
 	}
+	
+	// Adjust for short duration tests - can't open 5000 WS connections in 10s
+	if cfg.Duration <= 15 {
+		maxConns = cfg.Duration * 50 // 10s = 500 conns, 15s = 750 conns
+		if maxConns < 200 {
+			maxConns = 200
+		}
+	}
 
 	log.Printf("WebSocket Storm: opening %d WS connections to %s:%s", maxConns, host, port)
 

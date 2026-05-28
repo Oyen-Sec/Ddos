@@ -44,6 +44,14 @@ func runConnectionFlood(cfg *AttackConfig) {
 	if maxConns < 1000 {
 		maxConns = 5000
 	}
+	
+	// Adjust for short duration tests - can't open 5000 connections in 10s
+	if cfg.Duration <= 15 {
+		maxConns = cfg.Duration * 100 // 10s = 1000 conns, 15s = 1500 conns
+		if maxConns < 500 {
+			maxConns = 500
+		}
+	}
 
 	log.Printf("Connection Exhaustion: opening %d TCP connections to %s:%s", maxConns, host, port)
 

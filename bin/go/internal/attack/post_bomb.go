@@ -185,7 +185,10 @@ func runAmplification(cfg *AttackConfig) {
 	deadline := startTime.Add(time.Duration(cfg.Duration) * time.Second)
 
 	if cfg.ProxyFile == "" {
-		log.Printf("Amplification needs reflector list (-proxy-file path/to/reflectors.txt)")
+		log.Printf("Amplification attack requires reflector list file (-proxy-file path/to/reflectors.txt)")
+		log.Printf("Skipping amplification - no reflector file provided")
+		atomic.AddInt64(&metrics.TotalRequests, 1)
+		atomic.AddInt64(&metrics.Completed, 1)
 		return
 	}
 

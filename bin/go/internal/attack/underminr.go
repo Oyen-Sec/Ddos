@@ -56,6 +56,12 @@ func runUnderminrBypass(cfg *AttackConfig) {
 		"apple.com", "www.apple.com",
 		"netflix.com", "www.netflix.com",
 	}
+	
+	// Quick mode for short duration tests (< 20s)
+	if cfg.Duration < 20 {
+		log.Printf("[UNDERMINR] Quick mode: testing only top 3 trusted domains")
+		trustedDomains = trustedDomains[:3] // Only test cloudflare.com, www.cloudflare.com, amazon.com
+	}
 
 	// Phase 3: Try each edge IP with each trusted domain
 	var bypassOk bool
