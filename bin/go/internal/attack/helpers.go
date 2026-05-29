@@ -2,7 +2,6 @@ package attack
 
 import (
 	"fmt"
-	"net"
 	"net/http"
 	"runtime"
 	"sync/atomic"
@@ -67,11 +66,9 @@ func getTransport(timeout, keepAlive, maxConns int) *http.Transport {
 		ForceAttemptHTTP2:   http2Enabled,
 		ResponseHeaderTimeout: time.Duration(timeout) * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
-		DialContext: (&net.Dialer{
-			Timeout:   time.Duration(timeout) * time.Second,
-			KeepAlive: time.Duration(keepAlive) * time.Second,
-			DualStack: true,
-		}).DialContext,
+		DialContext: createDialerWithKeepAlive("",
+			time.Duration(timeout)*time.Second,
+			time.Duration(keepAlive)*time.Second),
 	}
 }
 

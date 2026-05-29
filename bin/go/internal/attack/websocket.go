@@ -163,8 +163,8 @@ func runWebSocketStorm(cfg *AttackConfig) {
 }
 
 func openWebSocket(host, port, path string, useTLS bool) (net.Conn, error) {
-	dialer := &net.Dialer{Timeout: 5 * time.Second}
-	rawConn, err := dialer.Dial("tcp", host+":"+port)
+	dial := createDialer("", 5*time.Second)
+	rawConn, err := dial("tcp", host+":"+port)
 	if err != nil {
 		return nil, err
 	}

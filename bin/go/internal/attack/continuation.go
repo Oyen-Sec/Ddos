@@ -75,8 +75,8 @@ func continuationWorker(id int, host, port, path string, deadline time.Time, wg 
 }
 
 func burstContinuation(host, port, path string, deadline time.Time) error {
-	dialer := &net.Dialer{Timeout: 10 * time.Second}
-	rawConn, err := dialer.Dial("tcp", host+":"+port)
+	dial := createDialer("", 10*time.Second)
+	rawConn, err := dial("tcp", host+":"+port)
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}
@@ -213,8 +213,8 @@ func fallbackHTTP1FloodCont(rawConn net.Conn, host, port, path string, deadline 
 	// Reopen connection since we closed TLS
 	rawConn.Close()
 	
-	dialer := &net.Dialer{Timeout: 5 * time.Second}
-	conn, err := dialer.Dial("tcp", host+":"+port)
+	dial := createDialer("", 5*time.Second)
+	conn, err := dial("tcp", host+":"+port)
 	if err != nil {
 		return fmt.Errorf("fallback dial: %w", err)
 	}

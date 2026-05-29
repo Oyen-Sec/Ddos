@@ -126,8 +126,8 @@ func parseTargetForH2(target string) (host string, port string, path string, err
 
 func burstRapidReset(host, port, path string, deadline time.Time) error {
 	// Fast TLS dial
-	dialer := &net.Dialer{Timeout: 10 * time.Second}
-	rawConn, err := dialer.Dial("tcp", host+":"+port)
+	dial := createDialer("", 10*time.Second)
+	rawConn, err := dial("tcp", host+":"+port)
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}
@@ -277,8 +277,8 @@ func fallbackHTTP1Flood(rawConn net.Conn, host, port, path string, deadline time
 	// Reopen connection since we closed TLS
 	rawConn.Close()
 	
-	dialer := &net.Dialer{Timeout: 5 * time.Second}
-	conn, err := dialer.Dial("tcp", host+":"+port)
+	dial := createDialer("", 5*time.Second)
+	conn, err := dial("tcp", host+":"+port)
 	if err != nil {
 		return fmt.Errorf("fallback dial: %w", err)
 	}

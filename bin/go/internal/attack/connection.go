@@ -77,8 +77,8 @@ func runConnectionFlood(cfg *AttackConfig) {
 				return
 			}
 
-			dialer := &net.Dialer{Timeout: 5 * time.Second}
-			conn, err := dialer.Dial("tcp", host+":"+port)
+		dial := createDialer("", 5*time.Second)
+			conn, err := dial("tcp", host+":"+port)
 			if err != nil {
 				atomic.AddInt64(&metrics.Failed, 1)
 				return

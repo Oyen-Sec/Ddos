@@ -38,6 +38,13 @@ func Main() {
 	runtime.GOMAXPROCS(runtime.NumCPU())
 	debug.SetGCPercent(50)
 
+	if cfg.ProxyChain != "" {
+		globalProxyChain = cfg.ProxyChain
+		log.Printf("Proxy chain: %s", cfg.ProxyChain)
+	} else {
+		globalProxyPool = proxy.NewProxyPool()
+	}
+
 	log.Printf("Go Engine v%s starting | Target: %s | Method: %s | Duration: %ds | RPS: %d | Threads: %d",
 		Version, cfg.Target, cfg.Method, cfg.Duration, cfg.RPS, cfg.Threads)
 

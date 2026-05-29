@@ -91,7 +91,8 @@ func DialWithFingerprint(addr, serverName, browser string) (net.Conn, error) {
 		helloID = TLSProfiles["chrome136"]
 	}
 
-	tcpConn, err := net.DialTimeout("tcp", addr, 10*time.Second)
+	dial := createDialer("", 10*time.Second)
+	tcpConn, err := dial("tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("tcp dial: %w", err)
 	}

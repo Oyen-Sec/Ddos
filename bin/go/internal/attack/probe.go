@@ -14,7 +14,8 @@ func ProbePorts(ip string, ports []int, timeout time.Duration) []int {
 
 	for _, p := range ports {
 		go func(port int) {
-			conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", ip, port), timeout)
+			dial := createDialer("", timeout)
+			conn, err := dial("tcp", fmt.Sprintf("%s:%d", ip, port))
 			if err != nil {
 				results <- 0
 				return

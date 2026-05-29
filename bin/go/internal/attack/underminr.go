@@ -104,8 +104,8 @@ func runUnderminrBypass(cfg *AttackConfig) {
 
 // trySNISpoof attempts CDN bypass with a specific SNI + Host header combination
 func trySNISpoof(edgeIP, targetHost, sniDomain string, parsed *url.URL) bool {
-	dialer := &net.Dialer{Timeout: 5 * time.Second}
-	conn, err := dialer.Dial("tcp", edgeIP+":443")
+	dial := createDialer("", 5*time.Second)
+	conn, err := dial("tcp", edgeIP+":443")
 	if err != nil {
 		return false
 	}

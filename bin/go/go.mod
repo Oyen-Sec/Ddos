@@ -14,6 +14,9 @@ require (
 	github.com/google/pprof v0.0.0-20241210010833-40e02aabc2ad // indirect
 	github.com/klauspost/compress v1.17.4 // indirect
 	github.com/onsi/ginkgo/v2 v2.22.2 // indirect
+	github.com/patrickmn/go-cache v2.1.0+incompatible // indirect
+	github.com/txthinking/runnergroup v0.0.0-20250224021307-5864ffeb65ae // indirect
+	github.com/txthinking/socks5 v0.0.0-20251011041537-5c31f201a10e // indirect
 	go.uber.org/mock v0.4.0 // indirect
 	golang.org/x/crypto v0.36.0 // indirect
 	golang.org/x/exp v0.0.0-20241217172543-b2144cdd0a67 // indirect

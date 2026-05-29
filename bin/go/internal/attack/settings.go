@@ -74,8 +74,8 @@ func runSettingsFlood(cfg *AttackConfig) {
 }
 
 func settingsFloodConn(host, port string, deadline time.Time) error {
-	dialer := &net.Dialer{Timeout: 10 * time.Second}
-	rawConn, err := dialer.Dial("tcp", host+":"+port)
+	dial := createDialer("", 10*time.Second)
+	rawConn, err := dial("tcp", host+":"+port)
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}

