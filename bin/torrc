@@ -1,0 +1,6 @@
+SocksPort 9050
+DataDirectory C:\Users\manap\AppData\Local\Temp\opencode\tor\data
+Log notice stdout
+CircuitBuildTimeout 10
+LearnCircuitBuildTimeout 0
+NumEntryGuards 4
