@@ -337,33 +337,66 @@ Log notice file {TOR_LOG_DIR / f'tor{instance.instance_id}.log'}
         logger.info(f"Started {success_count}/{self.num_instances} Tor instances")
         return success_count
     
-    def wait_for_bootstrap(self, instance: TorInstance, timeout: int = 120) -> bool:
-        """Wait for Tor instance to reach 100% bootstrap."""
+    def wait_for_bootstrap(self, instance: TorInstance, timeout: int = 120,
+                           show_progress: bool = True) -> bool:
+        """Wait for Tor instance to reach 100% bootstrap. Shows live progress bar."""
         log_path = TOR_LOG_DIR / f"tor{instance.instance_id}.log"
         deadline = time.time() + timeout
-        
+        last_pct = -1
+        last_phase = ""
+        spinner = ['|', '/', '-', '\\']
+        spin_idx = 0
+
         while time.time() < deadline:
             try:
                 if log_path.exists():
                     content = log_path.read_text(encoding='utf-8', errors='replace')
                     if 'Bootstrapped 100%' in content:
+                        if show_progress:
+                            self._render_progress(instance.instance_id, 100, "DONE", spinner[spin_idx])
+                            print()
                         return True
-                    # Extract progress
-                    for line in content.split('\n'):
+                    # Find latest bootstrap percentage
+                    pct_int = 0
+                    phase = ""
+                    for line in reversed(content.split('\n')):
                         if 'Bootstrapped' in line and '%' in line:
-                            pct = line.split('Bootstrapped')[1].split('%')[0].strip()
                             try:
-                                pct_int = int(pct)
-                                if pct_int > 50:
-                                    # Close to done, check more frequently
-                                    time.sleep(1)
-                                    continue
-                            except: pass
+                                pct_str = line.split('Bootstrapped')[1].split('%')[0].strip()
+                                pct_int = int(pct_str)
+                                if '(' in line and ')' in line:
+                                    phase = line.split('(')[1].split(')')[0].strip()
+                                break
+                            except Exception:
+                                continue
+                    if show_progress and (pct_int != last_pct or phase != last_phase):
+                        self._render_progress(instance.instance_id, pct_int, phase, spinner[spin_idx])
+                        last_pct = pct_int
+                        last_phase = phase
+                spin_idx = (spin_idx + 1) % 4
             except Exception:
                 pass
-            time.sleep(3)
-        
+            time.sleep(0.5)
+
+        if show_progress:
+            print()
         return False
+
+    @staticmethod
+    def _render_progress(inst_id: int, pct: int, phase: str, spin: str):
+        """Render a single-line progress bar (cross-line refresh)."""
+        bar_width = 30
+        filled = int((pct / 100.0) * bar_width)
+        bar = '#' * filled + '-' * (bar_width - filled)
+        phase_short = (phase[:30] + '..') if len(phase) > 32 else phase
+        msg = f"\r  [tor{inst_id}] {spin} [{bar}] {pct:>3}% | {phase_short}"
+        # Pad to clear previous line
+        try:
+            import sys
+            sys.stdout.write(msg.ljust(80))
+            sys.stdout.flush()
+        except Exception:
+            print(msg)
     
     def check_instance_health(self, instance: TorInstance) -> Dict:
         """Check if Tor instance is healthy."""

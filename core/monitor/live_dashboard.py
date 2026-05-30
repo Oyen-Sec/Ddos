@@ -40,13 +40,15 @@ class LiveAttackDashboard:
 
     def __init__(self, target: str, vectors: List[Dict], proxy_pool=None,
                  duration: int = 0, color_func=None,
-                 origin_ip: str = "", profile_info: Dict = None):
+                 origin_ip: str = "", profile_info: Dict = None,
+                 screen: bool = False):
         self.target = target
         self.origin_ip = origin_ip
         self.profile_info = profile_info or {}
         self.vectors = vectors
         self.proxy_pool = proxy_pool
         self.duration = duration if duration > 0 else 60
+        self._screen = screen
         self.start_time = time.time()
         self._stop = False
         self._task: Optional[asyncio.Task] = None
@@ -319,7 +321,7 @@ class LiveAttackDashboard:
         self._live = Live(
             self._render(),
             refresh_per_second=10,
-            screen=False,
+            screen=self._screen,
             console=self.console,
         )
         self._live.start()

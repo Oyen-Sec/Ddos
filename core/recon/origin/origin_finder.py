@@ -1098,3 +1098,548 @@ class OriginFinder:
         if report.candidates:
             return report.candidates[0].ip
         return None
+
+
+# ======================================================================
+# OriginDiscoveryV2 - Async-first compact discovery API (2026)
+# Used by SmartAutoModeV5 pipeline
+# ======================================================================
+
+class OriginDiscoveryV2:
+    """
+    Async-first origin discovery for V5 pipeline.
+    Lightweight wrapper that runs 7 techniques in parallel and returns
+    a flat dict suitable for direct integration into attack pipelines.
+    """
+
+    CLOUDFLARE_NETS = [
+        "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22",
+        "104.16.0.0/13", "104.24.0.0/14", "108.162.192.0/18",
+        "131.0.72.0/22", "141.101.64.0/18", "162.158.0.0/15",
+        "172.64.0.0/13", "173.245.48.0/20", "188.114.96.0/20",
+        "190.93.240.0/20", "197.234.240.0/22", "198.41.128.0/17",
+    ]
+
+    def __init__(self, target: str, securitytrails_key: str = ""):
+        self.target = target.rstrip("/")
+        parsed = urlparse(self.target)
+        self.domain = parsed.hostname or target
+        self.origin_ips: Set[str] = set()
+        self.subdomains: List[str] = []
+        self.cdn_name: str = ""
+        self._st_key = securitytrails_key
+
+    def _is_valid_ip(self, ip: str) -> bool:
+        import ipaddress
+        try:
+            ipaddress.ip_address(ip)
+            return True
+        except Exception:
+            return False
+
+    def _is_cloudflare_ip(self, ip: str) -> bool:
+        import ipaddress
+        try:
+            addr = ipaddress.ip_address(ip)
+            for net in self.CLOUDFLARE_NETS:
+                if addr in ipaddress.ip_network(net):
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _add_ip(self, ip: str, source: str = ""):
+        if not self._is_valid_ip(ip):
+            return
+        if self._is_cloudflare_ip(ip):
+            return
+        self.origin_ips.add(ip)
+
+    def _is_cf_response(self, headers: dict) -> bool:
+        h = {k.lower(): v for k, v in headers.items()}
+        if "cf-ray" in h or "cf-cache-status" in h:
+            return True
+        if h.get("server", "").lower() == "cloudflare":
+            return True
+        return False
+
+    async def discover_all(self, timeout: int = 20) -> Dict:
+        coros = [
+            self._dns_history(timeout),
+            self._certificate_transparency(timeout),
+            self._subdomain_bruteforce(timeout),
+            self._dns_zone_transfer(timeout),
+            self._ip_range_scan(timeout),
+            self._http_via_analysis(timeout),
+            self._bypass_cdn(timeout),
+        ]
+        results = await asyncio.gather(*coros, return_exceptions=True)
+        combined = {}
+        for r in results:
+            if isinstance(r, dict):
+                combined.update(r)
+        combined["origin_ips"] = list(self.origin_ips)
+        combined["subdomains"] = self.subdomains[:50]
+        combined["cdn"] = self.cdn_name
+        return combined
+
+    async def _dns_history(self, timeout: int) -> Dict:
+        results = {"dns_history": []}
+        if not self._st_key:
+            return {"dns_history": "Requires SecurityTrails API key"}
+        try:
+            loop = asyncio.get_running_loop()
+            headers = {"APIKEY": self._st_key, "Accept": "application/json"}
+
+            def _fetch_history():
+                import requests as req
+                urls = [
+                    f"https://api.securitytrails.com/v1/history/{self.domain}/dns/a",
+                    f"https://api.securitytrails.com/v1/domain/{self.domain}",
+                ]
+                seen: set = set()
+                all_ips = []
+                for url in urls:
+                    try:
+                        r = req.get(url, headers=headers, timeout=timeout//2, verify=False)
+                        if r.status_code == 200:
+                            data = r.json()
+                            # Parse different response formats
+                            for rec in data.get("records", []):
+                                if rec.get("type") == "A":
+                                    for val in rec.get("values", []):
+                                        ip = val.get("ip", "")
+                                        if ip and ip not in seen:
+                                            seen.add(ip)
+                                            all_ips.append(ip)
+                            # Also check top-level A records
+                            for a_rec in data.get("current_dns", {}).get("a", {}).get("values", []):
+                                ip = a_rec.get("ip", "")
+                                if ip and ip not in seen:
+                                    seen.add(ip)
+                                    all_ips.append(ip)
+                    except Exception:
+                        continue
+                return all_ips
+
+            def _fetch_subdomains():
+                import requests as req
+                try:
+                    url = f"https://api.securitytrails.com/v1/domain/{self.domain}/subdomains"
+                    r = req.get(url, headers=headers, timeout=timeout//2, verify=False)
+                    if r.status_code == 200:
+                        data = r.json()
+                        return [f"{sd}.{self.domain}" for sd in data.get("subdomains", [])]
+                except Exception:
+                    pass
+                return []
+
+            ips_task = loop.run_in_executor(None, _fetch_history)
+            subs_task = loop.run_in_executor(None, _fetch_subdomains)
+            dns_ips, sub_list = await asyncio.gather(ips_task, subs_task)
+
+            for ip in dns_ips:
+                self._add_ip(ip, "securitytrails")
+                results["dns_history"].append(ip)
+            for sd in sub_list:
+                self.subdomains.append(sd)
+        except Exception:
+            pass
+        return results
+
+    async def _certificate_transparency(self, timeout: int) -> Dict:
+        results = {"crt_sh_domains": [], "crt_sh_ips": []}
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as sess:
+                # Query 1: domain names
+                url = f"https://crt.sh/?q=%25.{self.domain}&output=json"
+                async with sess.get(url, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+                    if resp.status == 200:
+                        text = await resp.text()
+                        data = json.loads(text)
+                        seen: Set[str] = set()
+                        ip_seen: Set[str] = set()
+                        for entry in data[:300]:
+                            name = entry.get("name_value", "")
+                            parts = re.split(r"[\n\s]", name)
+                            for p in parts:
+                                p = p.strip().lstrip("*.")
+                                if not p or p in seen:
+                                    continue
+                                seen.add(p)
+                                # Check if it's an IP
+                                if re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", p) or ":" in p:
+                                    if p not in ip_seen:
+                                        ip_seen.add(p)
+                                        results["crt_sh_ips"].append(p)
+                                        self._add_ip(p, "crt.sh_direct")
+                                elif self.domain in p:
+                                    self.subdomains.append(p)
+
+                # Query 2: IPs from certificate transparency (search by SHA256 hash)
+                # Try crt.sh with IP output format
+                try:
+                    url2 = f"https://crt.sh/?q={self.domain}&output=json&excluded=expired"
+                    async with sess.get(url2, timeout=aiohttp.ClientTimeout(total=timeout//2)) as resp2:
+                        if resp2.status == 200:
+                            data2 = json.loads(await resp2.text())
+                            for entry in data2[:200]:
+                                name = entry.get("name_value", "")
+                                # crt.sh sometimes returns IP:port format
+                                ip_match = re.findall(r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})", name)
+                                for ip in ip_match:
+                                    self._add_ip(ip, "crt.sh_extracted")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return results
+
+    async def _subdomain_bruteforce(self, timeout: int) -> Dict:
+        results = {"subdomains_found": []}
+        common = ["www", "mail", "ftp", "admin", "blog", "dev", "api", "staging", "vpn",
+                  "cdn", "support", "docs", "webmail", "portal", "direct", "origin",
+                  "origin-www", "backend", "internal", "ns1", "ns2", "smtp", "remote",
+                  "static", "img", "css", "js", "assets", "media", "files", "cloud",
+                  "app", "mobile", "m", "shop", "store", "secure", "login", "auth",
+                  "cp", "cpanel", "router", "firewall", "proxy", "billing", "forum"]
+        try:
+            import aiohttp, dns.resolver
+            sem = asyncio.Semaphore(20)
+            loop = asyncio.get_running_loop()
+            async def check(sub: str) -> Optional[str]:
+                fqdn = f"{sub}.{self.domain}"
+                try:
+                    answers = await asyncio.wait_for(
+                        loop.run_in_executor(None, lambda: dns.resolver.resolve(fqdn, "A", lifetime=5)),
+                        timeout=6
+                    )
+                    ips = [str(r) for r in answers]
+                    async with sem:
+                        async with aiohttp.ClientSession() as sess:
+                            try:
+                                async with sess.get(f"http://{fqdn}", timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                                    if resp.status < 500:
+                                        self.subdomains.append(fqdn)
+                                        for ip in ips:
+                                            self.origin_ips.add(ip)
+                                        return fqdn
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                return None
+            tasks = [check(sub) for sub in common]
+            done = await asyncio.gather(*tasks)
+            results["subdomains_found"] = [d for d in done if d]
+        except Exception:
+            pass
+        return results
+
+    async def _dns_zone_transfer(self, timeout: int) -> Dict:
+        results = {"zone_transfer": "failed"}
+        try:
+            import dns.query, dns.zone, dns.resolver
+            loop = asyncio.get_running_loop()
+            ns_answers = await asyncio.wait_for(
+                loop.run_in_executor(None, lambda: dns.resolver.resolve(self.domain, "NS", lifetime=10)),
+                timeout=11
+            )
+            for ns in ns_answers:
+                ns_name = str(ns.target).rstrip(".")
+                try:
+                    def _xfr():
+                        axfr = dns.query.xfr(ns_name, self.domain, lifetime=10)
+                        return dns.zone.from_xfr(axfr)
+                    zone = await asyncio.wait_for(
+                        loop.run_in_executor(None, _xfr),
+                        timeout=11
+                    )
+                    for name, node in zone.nodes.items():
+                        fqdn = str(name) + "." + self.domain if name != "@" else self.domain
+                        self.subdomains.append(fqdn)
+                    results["zone_transfer"] = "success"
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return results
+
+    async def _ip_range_scan(self, timeout: int) -> Dict:
+        results = {"ip_ranges_scanned": 0, "non_cf_ips": []}
+        try:
+            import aiohttp
+            loop = asyncio.get_running_loop()
+            ip = await loop.run_in_executor(None, lambda: socket.gethostbyname(self.domain))
+            base = ".".join(ip.split(".")[:2])
+            targets = [f"{base}.{i}.1" for i in range(0, 256, 16)][:16]
+
+            # First get real server response to compare
+            real_headers = {}
+            try:
+                async with aiohttp.ClientSession() as sess:
+                    async with sess.get(
+                        f"https://{self.domain}",
+                        timeout=aiohttp.ClientTimeout(total=8),
+                        headers={"User-Agent": "Mozilla/5.0"}
+                    ) as resp:
+                        real_headers = {k.lower(): v for k, v in dict(resp.headers).items()}
+                        # Detect CDN from response
+                        if self._is_cf_response(real_headers):
+                            self.cdn_name = "Cloudflare"
+            except Exception:
+                pass
+
+            sem = asyncio.Semaphore(8)
+
+            async def check_ip(target_ip: str) -> bool:
+                async with sem:
+                    try:
+                        async with aiohttp.ClientSession() as sess:
+                            async with sess.get(
+                                f"http://{target_ip}",
+                                timeout=aiohttp.ClientTimeout(total=3),
+                                headers={"Host": self.domain, "User-Agent": "Mozilla/5.0"}
+                            ) as resp:
+                                if resp.status < 500:
+                                    rh = {k.lower(): v for k, v in dict(resp.headers).items()}
+                                    # Skip if it's a Cloudflare response
+                                    if self._is_cf_response(rh):
+                                        return False
+                                    # Compare with real server response
+                                    if real_headers:
+                                        real_server = real_headers.get("server", "").lower()
+                                        resp_server = rh.get("server", "").lower()
+                                        if resp_server and real_server and resp_server == real_server:
+                                            self._add_ip(target_ip, "ip_range_match")
+                                            self.origin_ips.add(target_ip)
+                                            return True
+                                        # If response matches real server, high confidence
+                                        if resp_server and real_server and resp_server != "cloudflare":
+                                            self._add_ip(target_ip, "ip_range_mismatch")
+                                            self.origin_ips.add(target_ip)
+                                            return True
+                                    # No comparison available, add with low confidence
+                                    self._add_ip(target_ip, "ip_range_fallback")
+                                    self.origin_ips.add(target_ip)
+                                    return True
+                    except Exception:
+                        pass
+                    return False
+
+            done = await asyncio.gather(*[check_ip(t) for t in targets])
+            results["ip_ranges_scanned"] = sum(1 for d in done if d)
+        except Exception:
+            pass
+        return results
+
+    async def _http_via_analysis(self, timeout: int) -> Dict:
+        results = {"headers_analysis": {}}
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as sess:
+                async with sess.get(f"https://{self.domain}",
+                                    timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+                    h = {k.lower(): v for k, v in dict(resp.headers).items()}
+                    results["headers_analysis"] = h
+                    if "via" in h:
+                        self.origin_ips.add(h["via"])
+                    if "x-amz-cf-id" in h or "x-amz-cf-pop" in h:
+                        self.cdn_name = "CloudFront"
+                    elif "cf-ray" in h or "cf-cache-status" in h:
+                        self.cdn_name = "Cloudflare"
+                    elif "x-azure-ref" in h:
+                        self.cdn_name = "Azure CDN"
+                    elif "x-edge-request-id" in h:
+                        self.cdn_name = "Fastly"
+                    elif "akamai-request-id" in h or "x-akamai" in h:
+                        self.cdn_name = "Akamai"
+        except Exception:
+            pass
+        return results
+
+    async def _bypass_cdn(self, timeout: int) -> Dict:
+        results = {"bypass_ips": []}
+        techniques = [
+            ("SSL/TLS alert", lambda: self._ssl_bypass(timeout)),
+            ("IPv6 origin", lambda: self._ipv6_origin(timeout)),
+            ("Direct IP from cert", lambda: self._cert_scan(timeout)),
+            ("Favicon hash match", lambda: self._favicon_search(timeout)),
+            ("Direct origin connect", lambda: self._direct_origin_probe(timeout)),
+        ]
+        for name, func in techniques:
+            try:
+                r = await asyncio.wait_for(func(), timeout=timeout // 4 + 5)
+                if r:
+                    for ip in r:
+                        self._add_ip(ip, name)
+                    results["bypass_ips"].extend(r)
+            except Exception:
+                pass
+        return results
+
+    async def _favicon_search(self, timeout: int) -> List[str]:
+        found = []
+        try:
+            import aiohttp, mmh3, codecs, asyncio
+            # Get favicon from target
+            async with aiohttp.ClientSession() as sess:
+                favicon_urls = [
+                    f"https://{self.domain}/favicon.ico",
+                    f"https://{self.domain}/favicon.png",
+                ]
+                favicon_data = None
+                for url in favicon_urls:
+                    try:
+                        async with sess.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                            if resp.status == 200:
+                                favicon_data = await resp.read()
+                                break
+                    except Exception:
+                        continue
+                if not favicon_data:
+                    return found
+                # Compute favicon hash (Shodan mmh3 hash)
+                try:
+                    import mmh3
+                    favicon_b64 = base64.b64encode(favicon_data)
+                    # Standard Shodan favicon hash (mmh3 of base64)
+                    fhash = mmh3.hash(favicon_b64)
+                    # Search Shodan for this favicon
+                    shodan_url = f"https://search.censys.io/api/v2/hosts/search?q=services.http.response.favicons.sha256_hash:<hash>"
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return found
+
+    async def _direct_origin_probe(self, timeout: int) -> List[str]:
+        found = []
+        try:
+            import aiohttp
+            loop = asyncio.get_running_loop()
+            # Try common origin patterns
+            origin_candidates = [
+                f"origin.{self.domain}",
+                f"direct.{self.domain}",
+                f"direct-connect.{self.domain}",
+                f"origin-www.{self.domain}",
+                f"cdn.{self.domain}",
+            ]
+            async with aiohttp.ClientSession() as sess:
+                for oc in origin_candidates:
+                    try:
+                        # Resolve DNS
+                        ips = await asyncio.wait_for(
+                            loop.run_in_executor(None, lambda: [str(r) for r in __import__('dns').resolver.resolve(oc, 'A', lifetime=3)]),
+                            timeout=4
+                        )
+                        for ip in ips:
+                            if not self._is_cloudflare_ip(ip):
+                                # Try direct connection
+                                try:
+                                    async with sess.get(
+                                        f"https://{ip}",
+                                        timeout=aiohttp.ClientTimeout(total=4),
+                                        headers={
+                                            "Host": self.domain,
+                                            "User-Agent": "Mozilla/5.0"
+                                        },
+                                        ssl=False
+                                    ) as resp:
+                                        if resp.status < 500:
+                                            found.append(ip)
+                                            self.subdomains.append(oc)
+                                except Exception:
+                                    pass
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        return found
+
+    async def _ssl_bypass(self, timeout: int) -> List[str]:
+        found = []
+        try:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            loop = asyncio.get_running_loop()
+            ip = await loop.run_in_executor(None, lambda: socket.gethostbyname(self.domain))
+            base = ".".join(ip.split(".")[:2])
+            for i in range(1, 255, 4):
+                test_ip = f"{base}.{i}"
+                try:
+                    reader, writer = await asyncio.wait_for(
+                        asyncio.open_connection(test_ip, 443, ssl=ctx, server_hostname=""),
+                        timeout=3
+                    )
+                    cert = writer.get_extra_info("ssl_object").getpeercert()
+                    if cert:
+                        subjects = [v for _, v in cert.get("subjectAltName", [])]
+                        if any(self.domain in str(s) for s in subjects):
+                            found.append(test_ip)
+                            self.origin_ips.add(test_ip)
+                    writer.close()
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return found
+
+    async def _ipv6_origin(self, timeout: int) -> List[str]:
+        found = []
+        try:
+            import dns.resolver
+            loop = asyncio.get_running_loop()
+            answers = await asyncio.wait_for(
+                loop.run_in_executor(None, lambda: dns.resolver.resolve(
+                    self.domain, "AAAA", lifetime=5, raise_on_no_answer=False)),
+                timeout=6
+            )
+            for rdata in answers:
+                ipv6 = str(rdata)
+                found.append(ipv6)
+                self._add_ip(ipv6, "ipv6_direct")
+                # Also try to extract IPv4 from IPv4-mapped IPv6 (NAT64)
+                if ipv6.startswith("64:ff9b::"):
+                    # NAT64 prefix, extract embedded IPv4
+                    import ipaddress
+                    try:
+                        full = ipaddress.IPv6Address(ipv6)
+                        # Extract last 4 bytes
+                        packed = full.packed
+                        ipv4_bytes = packed[12:16]
+                        ipv4 = str(ipaddress.IPv4Address(ipv4_bytes))
+                        self._add_ip(ipv4, "nat64_unwrap")
+                        found.append(ipv4)
+                    except Exception:
+                        pass
+                # Also try ::ffff:x.x.x.x (IPv4-mapped IPv6)
+                elif ipv6.startswith("::ffff:"):
+                    ipv4 = ipv6.split(":")[-1]
+                    self._add_ip(ipv4, "ipv4_mapped")
+                    found.append(ipv4)
+        except Exception:
+            pass
+        return found
+
+    async def _cert_scan(self, timeout: int) -> List[str]:
+        found = []
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as sess:
+                url = f"https://crt.sh/?q={self.domain}&output=json"
+                async with sess.get(url, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+                    if resp.status == 200:
+                        data = json.loads(await resp.text())
+                        for entry in data[:50]:
+                            name = entry.get("name_value", "")
+                            if ":" in name and re.match(r"^[\d.]+:\d+$", name):
+                                ip = name.split(":")[0]
+                                found.append(ip)
+                                self.origin_ips.add(ip)
+        except Exception:
+            pass
+        return found
