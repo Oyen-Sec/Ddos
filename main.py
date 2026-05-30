@@ -4106,7 +4106,8 @@ async def main():
                  "headers-flood", "cookie-bomb", "range-amp", "xmlrpc",
                  "api-flood", "api-rest", "graphql", "graphql-deep",
                  "grpc-flood", "json-bomb", "xml-bomb",
-                 "cold-start", "cost-accum", "websocket"])
+                 "cold-start", "cost-accum", "websocket",
+                 "dns-flood", "dns-amp"])
     p.add_argument("--duration", "-d", type=int, default=0)
     p.add_argument("--rps", "-r", type=int, default=0)
     p.add_argument("--threads", "-T", type=int, default=0)
