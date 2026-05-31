@@ -2635,14 +2635,14 @@ async def run_mixed_attack(target: str, cfg: dict):
     )
 
     vectors = [
-        ("killer_1", "H2 Exhaust", 0.20, 4),
-        ("killer_2", "H2 Exhaust", 0.20, 4),
-        ("killer_3", "H2 Exhaust", 0.15, 3),
-        ("killer_4", "H2 Exhaust", 0.15, 3),
-        ("killer_5", "H2 Exhaust", 0.10, 2),
-        ("killer_6", "H2 Exhaust", 0.10, 2),
-        ("killer_7", "H2 Exhaust", 0.07, 2),
-        ("killer_8", "H2 Exhaust", 0.03, 1),
+        ("killer_1", "H2 Exhaust", 0.20, 8),
+        ("killer_2", "H2 Exhaust", 0.20, 8),
+        ("killer_3", "H2 Exhaust", 0.15, 6),
+        ("killer_4", "H2 Exhaust", 0.15, 6),
+        ("killer_5", "H2 Exhaust", 0.10, 4),
+        ("killer_6", "H2 Exhaust", 0.10, 4),
+        ("killer_7", "H2 Exhaust", 0.07, 3),
+        ("killer_8", "H2 Exhaust", 0.03, 2),
     ]
     for name, label, _share, _conns in vectors:
         dash.register_vector(name, label)
