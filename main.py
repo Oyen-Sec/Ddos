@@ -2422,11 +2422,11 @@ async def run_mixed_attack(target: str, cfg: dict):
 
     # Auto-detect CDN and find origin IP
     print(f"\n {c('c','[*]')} Checking for CDN protection...")
+    from urllib.parse import urlparse
+    parsed = urlparse(target)
+    hostname = parsed.hostname or target
     origin_ip = None
     try:
-        from urllib.parse import urlparse
-        parsed = urlparse(target)
-        hostname = parsed.hostname or target
         import socket as _sck
         loop = asyncio.get_event_loop()
         direct_ip = await loop.run_in_executor(None, _sck.gethostbyname, hostname)
