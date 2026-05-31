@@ -1646,19 +1646,62 @@ class OriginDiscoveryV2:
         return found
 
 
+async def _fast_direct_probe(hostname: str) -> Optional[str]:
+    """Very fast check: connect to resolved IP directly with correct Host header,
+    return IP if it serves the same content as the CDN."""
+    try:
+        import socket as _sk, ssl as _ssl, hashlib
+        ip = _sk.gethostbyname(hostname)
+        for port, scheme in [(443, 'https'), (80, 'http')]:
+            try:
+                s = _sk.socket()
+                s.settimeout(3)
+                s.connect((ip, port))
+                if scheme == 'https':
+                    ctx = _ssl.create_default_context()
+                    ctx.check_hostname = False
+                    ctx.verify_mode = _ssl.CERT_NONE
+                    s = ctx.wrap_socket(s, server_hostname=hostname)
+                s.send(
+                    f"GET / HTTP/1.1\r\nHost: {hostname}\r\nUser-Agent: Mozilla/5.0\r\nAccept: */*\r\nConnection: close\r\n\r\n".encode()
+                )
+                resp = s.recv(4096)
+                s.close()
+                if b"HTTP/1.1 200" in resp or b"HTTP/1.0 200" in resp:
+                    return ip
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
+
+
 async def find_origin_ip(target: str, timeout: int = 15) -> Optional[Dict]:
-    """Async wrapper: find the origin IP for a target using OriginFinder.
-    Returns dict with 'origin_ip' key, or None."""
+    """Find origin IP for a target behind CDN.
+    Returns dict with 'origin_ip' key, or None if not found."""
     try:
         from urllib.parse import urlparse
         parsed = urlparse(target)
         hostname = parsed.hostname or target
-        finder = OriginDiscoveryV2(hostname, timeout=timeout)
-        report: OriginReport = await finder.find()
-        if report.verified_origin:
-            return {"origin_ip": report.verified_origin, "method": "origin_finder"}
+
+        # Fast pre-check: resolved IP might be origin if CDN is misconfigured
+        fast = await _fast_direct_probe(hostname)
+        if fast:
+            return {"origin_ip": fast, "method": "direct_probe"}
+
+        # Full hunter (parallel, many sources)
+        from core.recon.origin.origin_hunter import OriginHunter
+        hunter = OriginHunter(timeout=min(timeout, 8))
+        report = await asyncio.wait_for(
+            hunter.hunt(hostname, env={}),
+            timeout=timeout
+        )
+        if report.verified_origins:
+            return {"origin_ip": report.verified_origins[0], "method": "verified"}
         if report.candidates:
             return {"origin_ip": report.candidates[0].ip, "method": "candidate"}
+        return None
+    except asyncio.TimeoutError:
         return None
     except Exception:
         return None
