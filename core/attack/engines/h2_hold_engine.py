@@ -155,10 +155,11 @@ class H2Holder:
 def run_hold_worker(
     target_url: str, duration: float, worker_id: int,
     stats_queue, stop_event, host_header: str = "",
-    connections: int = 100,
+    connections: int = 100, proxy_url: str = "",
 ) -> None:
     """
     Open and hold many h2 connections to exhaust nginx worker_connections.
+    If proxy_url is provided, connections go through SOCKS5 proxy.
     """
     parsed = urlparse(target_url)
     host = parsed.hostname or parsed.netloc.split(":")[0]
