@@ -1029,7 +1029,7 @@ async def prompt_attack_options(target: str, ask_proxy: bool = True, ask_origin:
                             proxy_pool = ProxyPool(connect_timeout=10)
                             for h in healthy:
                                 socks_port = TOR_BASE_SOCKS_PORT + (h['instance_id'] - 1) * 2
-                                proxy_pool._pending.append(f"socks5://127.0.0.1:{socks_port}")
+                                proxy_pool._pending.append(f"socks5h://127.0.0.1:{socks_port}")
                             print(f" {c('g','[+]')} Tor ready: {len(healthy)} instances")
             except Exception as e:
                 print(f" {c('r','[-]')} Tor setup error: {e}")
@@ -1629,7 +1629,7 @@ async def run_http_flood(target: str, cfg: dict):
 
     # Also check if user has Tor running locally (common SOCKS5 fallback)
     socks_fallback = any([
-        u.startswith("socks5://127.0.0.1:") or u.startswith("socks5://localhost:")
+        "socks5" in u and ("127.0.0.1" in u or "localhost" in u)
         for u in proxy_urls
     ])
     if not proxy_urls:
@@ -1638,7 +1638,7 @@ async def run_http_flood(target: str, cfg: dict):
             s.settimeout(1)
             try:
                 s.connect(("127.0.0.1", port))
-                proxy_urls.append(f"socks5://127.0.0.1:{port}")
+                proxy_urls.append(f"socks5h://127.0.0.1:{port}")
             except Exception:
                 pass
             finally:
@@ -2079,7 +2079,7 @@ async def run_proxy_flood(target: str, cfg: dict):
                         for h in healthy:
                             from core.network.tor_manager import TOR_BASE_SOCKS_PORT
                             socks_port = TOR_BASE_SOCKS_PORT + (h['instance_id'] - 1) * 2
-                            proxy_pool._pending.append(f"socks5://127.0.0.1:{socks_port}")
+                            proxy_pool._pending.append(f"socks5h://127.0.0.1:{socks_port}")
                         print(f" {c('g','[+]')} Tor ready: {len(healthy)} instances")
         except Exception as e:
             print(f" {c('r','[-]')} Tor setup failed: {e}")
@@ -2573,7 +2573,7 @@ async def run_mixed_attack(target: str, cfg: dict):
                     s.settimeout(1)
                     try:
                         s.connect(("127.0.0.1", port))
-                        proxy_urls.append(f"socks5://127.0.0.1:{port}")
+                        proxy_urls.append(f"socks5h://127.0.0.1:{port}")
                     except Exception:
                         pass
                     finally:
@@ -3963,7 +3963,7 @@ async def run_advanced_attack(target: str, cfg: dict, method: str, label: str):
                         proxy_pool = ProxyPool(connect_timeout=10)
                         for h in healthy:
                             socks_port = 9050 + (h['instance_id'] - 1) * 2
-                            proxy_pool._pending.append(f"socks5://127.0.0.1:{socks_port}")
+                            proxy_pool._pending.append(f"socks5h://127.0.0.1:{socks_port}")
                         print(f" {c('g','[+]')} Tor ready: {len(healthy)} instances")
         except Exception as e:
             print(f" {c('r','[-]')} Tor setup failed: {e}")

