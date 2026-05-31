@@ -1067,11 +1067,11 @@ async def run_http_flood_multi(targets: List[str], cfg: dict):
         results = []
         live_q = _queue.Queue()
         killers = [
-            ("killer1", 0.30, 4),
-            ("killer2", 0.25, 3),
-            ("killer3", 0.20, 2),
-            ("killer4", 0.15, 2),
-            ("killer5", 0.10, 1),
+            ("killer1", 0.30, 8),
+            ("killer2", 0.25, 6),
+            ("killer3", 0.20, 5),
+            ("killer4", 0.15, 4),
+            ("killer5", 0.10, 2),
         ]
         for name, share, conns in killers:
             wrps = max(1000, int(rps * share))
@@ -1656,11 +1656,11 @@ async def run_http_flood(target: str, cfg: dict):
         target_rps=rps, stalled_ms=8000, refresh_ms=50,
     )
     vectors = [
-        ("killer_1", "H2 Exhaust", 0.25, 4),
-        ("killer_2", "H2 Exhaust", 0.25, 4),
-        ("killer_3", "H2 Exhaust", 0.20, 3),
-        ("killer_4", "H2 Exhaust", 0.20, 3),
-        ("killer_5", "H2 Exhaust", 0.10, 2),
+        ("killer_1", "H2 Exhaust", 0.25, 8),
+        ("killer_2", "H2 Exhaust", 0.25, 8),
+        ("killer_3", "H2 Exhaust", 0.20, 6),
+        ("killer_4", "H2 Exhaust", 0.20, 6),
+        ("killer_5", "H2 Exhaust", 0.10, 4),
     ]
     for name, label, _share, _conns in vectors:
         dash.register_vector(name, label)
