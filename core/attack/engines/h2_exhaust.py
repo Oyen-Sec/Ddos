@@ -1,6 +1,6 @@
 """
-HTTP/2 Killer Engine v3 — PHP-FPM Exhauster
-============================================
+HTTP/2 Exhaust Engine v3 — PHP-FPM Exhauster
+=============================================
 Key insight: nginx buffers POST bodies, so pending streams only
 hold nginx connections (not PHP workers). We send COMPLETE POST
 requests (login attempts, API calls) that trigger real PHP+DB
@@ -66,7 +66,7 @@ POST_API_BODIES = [
 
 
 @dataclass
-class KillerMetrics:
+class FloodMetrics:
     sent: int = 0
     completed: int = 0
     failed: int = 0
@@ -297,7 +297,7 @@ class H2Blaster:
                 pass
 
 
-def run_killer_worker(
+def run_h2_exhaust(
     target_url: str, rps: int, duration: float, worker_id: int,
     stats_queue, stop_event, host_header: str = "",
     connections: int = 4, result_dict: dict = None,
@@ -313,7 +313,7 @@ def run_killer_worker(
     port = parsed.port or 443
     hdr = host_header or host
 
-    metrics = KillerMetrics()
+    metrics = FloodMetrics()
     _last_report = time.time()
     _last_sent = 0
     start = time.time()

