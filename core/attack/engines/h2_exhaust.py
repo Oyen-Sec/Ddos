@@ -510,3 +510,58 @@ def run_h2_exhaust(
         result_dict["completed"] = metrics.completed
         result_dict["failed"] = metrics.failed
         result_dict["bytes_sent"] = metrics.bytes_sent
+
+
+async def run_h2_exhaust_async(
+    target_url: str,
+    duration: int,
+    rps: int = 50000,
+    host_header: str = "",
+    proxy_url: str = "",
+    connections: int = 4,
+    worker_id: int = 1000,
+) -> Dict[str, Any]:
+    """
+    Async wrapper around run_h2_exhaust.
+    Spawns the sync function in a thread with proper stop_event + stats_queue.
+    Waits for duration seconds then returns aggregated stats.
+    """
+    import asyncio
+    import queue
+    import threading
+
+    stats_queue: queue.Queue = queue.Queue(maxsize=1000)
+    stop_event = threading.Event()
+    result_dict: Dict[str, Any] = {}
+
+    th = threading.Thread(
+        target=run_h2_exhaust,
+        args=(target_url, rps, duration, worker_id, stats_queue, stop_event, host_header),
+        kwargs={"connections": connections, "result_dict": result_dict, "proxy_url": proxy_url},
+        daemon=True,
+    )
+    th.start()
+
+    # Aggregate stats from queue
+    total_sent = 0
+    total_failed = 0
+    deadline = time.time() + duration + 5
+    while time.time() < deadline and th.is_alive():
+        try:
+            snap = stats_queue.get_nowait()
+            if isinstance(snap, dict):
+                total_sent = max(total_sent, snap.get("sent", 0))
+                total_failed = max(total_failed, snap.get("failed", 0))
+        except queue.Empty:
+            pass
+        await asyncio.sleep(0.5)
+
+    stop_event.set()
+    th.join(timeout=5)
+
+    return {
+        "total": result_dict.get("sent", total_sent),
+        "ok": result_dict.get("completed", total_sent - total_failed),
+        "fail": result_dict.get("failed", total_failed),
+        "elapsed": duration,
+    }
