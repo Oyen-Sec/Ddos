@@ -7,9 +7,12 @@ import random
 import logging
 import socket
 import ssl
+import asyncio
 from typing import Dict, List, Optional, Callable, Any, Tuple
 from urllib.parse import urlparse, quote
 from dataclasses import dataclass
+
+from core.network.socks_utils import create_proxied_socket
 
 logger = logging.getLogger("waf_parsing_bypass")
 
@@ -603,12 +606,13 @@ class WafParsingBypassEngine:
             logger.error("Failed to apply method '%s': %s", method_name, exc)
             return None
 
-    def fuzz_target(self, target_url: str, methods_count: int = 5) -> List[Dict[str, Any]]:
+    def fuzz_target(self, target_url: str, methods_count: int = 5, proxy_url: Optional[str] = None) -> List[Dict[str, Any]]:
         """Test a subset of bypass methods against a target and return results.
 
         Args:
             target_url: URL to test against
             methods_count: number of random methods to select
+            proxy_url: optional SOCKS5 proxy URL (e.g. socks5h://127.0.0.1:9050)
 
         Returns:
             List of dicts with method details and whether they appeared to work
@@ -651,16 +655,17 @@ class WafParsingBypassEngine:
                 }
 
                 try:
-                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    sock.settimeout(5.0)
+                    sock = create_proxied_socket(proxy_url or "", timeout=5.0)
 
                     if use_ssl:
                         context = ssl.create_default_context()
                         context.check_hostname = False
                         context.verify_mode = ssl.CERT_NONE
                         sock = context.wrap_socket(sock, server_hostname=host)
+                        sock.connect((host, port))
+                    else:
+                        sock.connect((host, port))
 
-                    sock.connect((host, port))
                     sock.sendall(raw_request)
                     response = sock.recv(4096)
                     sock.close()
@@ -694,7 +699,7 @@ class WafParsingBypassEngine:
 
         return results
 
-    def detect_smuggling_vulnerability(self, target_url: str) -> Dict[str, Any]:
+    def detect_smuggling_vulnerability(self, target_url: str, proxy_url: Optional[str] = None) -> Dict[str, Any]:
         """Test if target is vulnerable to HTTP Request Smuggling.
 
         Tests CL.TE, TE.CL, and TE.TE variations.
@@ -752,16 +757,17 @@ class WafParsingBypassEngine:
 
         for test_key, (test_name, raw_bytes) in tests.items():
             try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(5.0)
+                sock = create_proxied_socket(proxy_url or "", timeout=5.0)
 
                 if use_ssl:
                     context = ssl.create_default_context()
                     context.check_hostname = False
                     context.verify_mode = ssl.CERT_NONE
                     sock = context.wrap_socket(sock, server_hostname=host)
+                    sock.connect((host, port))
+                else:
+                    sock.connect((host, port))
 
-                sock.connect((host, port))
                 sock.sendall(raw_bytes)
 
                 try:
@@ -771,7 +777,6 @@ class WafParsingBypassEngine:
                         "received_bytes": len(response),
                         "response": response[:256].decode("utf-8", errors="replace"),
                     }
-                    # If we get a response, the server likely processed our smuggled request
                     if b"smuggle" in response.lower() or b"200" in response[:64]:
                         results[f"{test_key}_vulnerable"] = True
                 except socket.timeout:

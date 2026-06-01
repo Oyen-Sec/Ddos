@@ -1,0 +1,28 @@
+"""
+Nodejs bypass module 2026.
+Generated: auto-detection + curl_cffi bypass + origin discovery.
+"""
+import asyncio, logging, socket
+from typing import Optional, Dict
+from core.bypass.bypass_base import BaseBypass
+
+logger = logging.getLogger(__name__)
+
+class NodejsBypass(BaseBypass):
+    """Bypass module for Nodejs."""
+
+    @staticmethod
+    def detect(headers: dict) -> bool:
+        if not headers:
+            return False
+        h = {k.lower(): v.lower() for k, v in headers.items()}
+        server = h.get("server", "")
+        if "node.js" in server or "nodejs" in server or "express" in server:
+            return True
+        if "x-powered-by" in h and "express" in h.get("x-powered-by", "").lower():
+            return True
+        return False
+
+    async def bypass(self, hostname: str, env: dict = None, proxy_url: Optional[str] = None) -> Dict:
+        url = f"https://{hostname}/"
+        return await self.bypass_with_curl_cffi(url, proxy_url)

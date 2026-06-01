@@ -166,11 +166,21 @@ class OriginHunter:
             "ipinfo", "bgpview", "viewdns", "netcraft",
         ]
 
-        try:
-            results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=45)
-        except asyncio.TimeoutError:
-            logger.warning(f"Origin hunt timed out for {host} after 45s")
-            results = [None] * len(tasks)
+        # Use asyncio.wait to avoid CancelledError propagation from inner tasks
+        done, pending = await asyncio.wait(tasks, timeout=45)
+        if pending:
+            logger.warning(f"Origin hunt for {host}: {len(pending)} tasks still running, cancelling...")
+            for t in pending:
+                t.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+        results = []
+        for t in done:
+            try:
+                results.append(t.result())
+            except Exception as e:
+                results.append(e)
+        # Pad results if some tasks weren't done
+        results += [None] * (len(tasks) - len(results))
 
         for i, r in enumerate(results):
             source_name = source_names[i] if i < len(source_names) else f"source_{i}"

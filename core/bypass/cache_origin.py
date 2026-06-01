@@ -15,6 +15,8 @@ import re
 from urllib.parse import urlparse
 
 
+
+
 @dataclass
 class OriginServer:
     """Discovered origin server information."""
@@ -329,18 +331,19 @@ class OriginDiscovery:
         
         return verified_origins
     
-    async def _verify_origin(self, ip: str) -> Optional[OriginServer]:
+    async def _verify_origin(self, ip: str, proxy_url: Optional[str] = None) -> Optional[OriginServer]:
         """Verify if IP is actual origin server."""
         try:
             import aiohttp
             start_time = asyncio.get_event_loop().time()
             
+            kwargs = {"headers": {"Host": self.domain}, "timeout": 5}
+            if proxy_url and proxy_url.startswith("http"):
+                kwargs["proxy"] = proxy_url
+            
             async with aiohttp.ClientSession() as session:
-                # Try direct connection to IP
                 url = f"http://{ip}"
-                headers = {'Host': self.domain}
-                
-                async with session.get(url, headers=headers, timeout=5) as resp:
+                async with session.get(url, **kwargs) as resp:
                     response_time = asyncio.get_event_loop().time() - start_time
                     
                     # Check if response looks like origin

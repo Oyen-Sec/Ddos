@@ -1,142 +1,14 @@
 {
-  "target": "https://tokyo88.mom/",
-  "host": "tokyo88.mom",
-  "timestamp": 1779892804.303288,
-  "timestamp_human": "2026-05-27 21:40:04",
-  "verified_origins": [
-    "192.64.119.195"
-  ],
+  "target": "https://tokyo88slot.cfd/",
+  "host": "tokyo88slot.cfd",
+  "timestamp": 1780316401.4647303,
+  "timestamp_human": "2026-06-01 19:20:01",
+  "verified_origins": [],
   "candidates": [
     {
-      "ip": "192.64.119.195",
-      "confidence": 1.0,
-      "source": "securitytrails",
-      "verified": true,
-      "response_match": true,
-      "response_status": 302,
-      "server": "namecheap-nginx"
-    },
-    {
-      "ip": "13.35.1.81",
-      "confidence": 1.05,
-      "source": "crt.sh+certspotter+health_endpoints+xforwarded_bypass+cdn_misconfig+ipinfo",
-      "verified": false,
-      "response_match": false,
-      "response_status": 0,
-      "server": ""
-    },
-    {
-      "ip": "52.85.193.121",
-      "confidence": 0.44999999999999996,
-      "source": "hackertarget+securitytrails",
-      "verified": false,
-      "response_match": false,
-      "response_status": 0,
-      "server": ""
-    },
-    {
-      "ip": "3.174.113.22",
+      "ip": "1.2.1.1",
       "confidence": 0.3,
-      "source": "hackertarget",
-      "verified": false,
-      "response_match": false,
-      "response_status": 0,
-      "server": ""
-    },
-    {
-      "ip": "3.174.113.126",
-      "confidence": 0.3,
-      "source": "hackertarget",
-      "verified": false,
-      "response_match": false,
-      "response_status": 0,
-      "server": ""
-    },
-    {
-      "ip": "3.174.113.9",
-      "confidence": 0.3,
-      "source": "hackertarget",
-      "verified": false,
-      "response_match": false,
-      "response_status": 0,
-      "server": ""
-    },
-    {
-      "ip": "3.174.113.74",
-      "confidence": 0.3,
-      "source": "hackertarget",
-      "verified": false,
-      "response_match": false,
-      "response_status": 0,
-      "server": ""
-    },
-    {
-      "ip": "52.85.193.63",
-      "confidence": 0.3,
-      "source": "securitytrails",
-      "verified": false,
-      "response_match": false,
-      "response_status": 0,
-      "server": ""
-    },
-    {
-      "ip": "52.85.193.67",
-      "confidence": 0.3,
-      "source": "securitytrails",
-      "verified": false,
-      "response_match": false,
-      "response_status": 0,
-      "server": ""
-    },
-    {
-      "ip": "52.85.193.77",
-      "confidence": 0.3,
-      "source": "securitytrails",
-      "verified": false,
-      "response_match": false,
-      "response_status": 0,
-      "server": ""
-    },
-    {
-      "ip": "3.174.46.40",
-      "confidence": 0.3,
-      "source": "urlscan",
-      "verified": false,
-      "response_match": false,
-      "response_status": 0,
-      "server": ""
-    },
-    {
-      "ip": "3.174.46.52",
-      "confidence": 0.3,
-      "source": "urlscan",
-      "verified": false,
-      "response_match": false,
-      "response_status": 0,
-      "server": ""
-    },
-    {
-      "ip": "3.174.46.88",
-      "confidence": 0.3,
-      "source": "urlscan",
-      "verified": false,
-      "response_match": false,
-      "response_status": 0,
-      "server": ""
-    },
-    {
-      "ip": "13.225.196.95",
-      "confidence": 0.3,
-      "source": "urlscan",
-      "verified": false,
-      "response_match": false,
-      "response_status": 0,
-      "server": ""
-    },
-    {
-      "ip": "13.35.1.13",
-      "confidence": 0.3,
-      "source": "subdomain_bruteforce",
+      "source": "zoomeye",
       "verified": false,
       "response_match": false,
       "response_status": 0,
@@ -145,70 +17,25 @@
     {
       "ip": "1.0.1.1",
       "confidence": 0.3,
-      "source": "viewdns",
+      "source": "zoomeye",
       "verified": false,
       "response_match": false,
       "response_status": 0,
       "server": ""
     },
     {
-      "ip": "1.2.1.1",
+      "ip": "172.0.0.0",
       "confidence": 0.3,
-      "source": "viewdns",
+      "source": "rapiddns",
       "verified": false,
       "response_match": false,
       "response_status": 0,
       "server": ""
     },
     {
-      "ip": "18.32.0.0",
+      "ip": "172.255.255.255",
       "confidence": 0.3,
-      "source": "netcraft",
-      "verified": false,
-      "response_match": false,
-      "response_status": 0,
-      "server": ""
-    },
-    {
-      "ip": "18.255.255.255",
-      "confidence": 0.3,
-      "source": "netcraft",
-      "verified": false,
-      "response_match": false,
-      "response_status": 0,
-      "server": ""
-    },
-    {
-      "ip": "18.64.0.0",
-      "confidence": 0.3,
-      "source": "netcraft",
-      "verified": false,
-      "response_match": false,
-      "response_status": 0,
-      "server": ""
-    },
-    {
-      "ip": "18.66.171.70",
-      "confidence": 0.3,
-      "source": "netcraft",
-      "verified": false,
-      "response_match": false,
-      "response_status": 0,
-      "server": ""
-    },
-    {
-      "ip": "18.67.255.255",
-      "confidence": 0.3,
-      "source": "netcraft",
-      "verified": false,
-      "response_match": false,
-      "response_status": 0,
-      "server": ""
-    },
-    {
-      "ip": "18.0.0.0",
-      "confidence": 0.3,
-      "source": "netcraft",
+      "source": "rapiddns",
       "verified": false,
       "response_match": false,
       "response_status": 0,

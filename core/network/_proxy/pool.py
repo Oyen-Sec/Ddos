@@ -13,7 +13,7 @@ from contextlib import contextmanager
 
 from core.network.flaresolverr_client import flaresolverr_client, CookieStore, BrowserSessionPool, FlareSolverrClient
 from core.network.flaresolverr_client import FlareSolverrError
-from core.network.tls_fingerprint import TLSFingerprintGenerator
+from core.network._tls.fingerprint import TLSFingerprintGenerator
 from core.network.http2_impersonator import get_random_profile
 
 logger = logging.getLogger("proxy_engine")
@@ -545,7 +545,7 @@ class ProxyPool:
         self._tls_generator = TLSFingerprintGenerator()
 
     async def load(self, proxies: List[str]) -> int:
-        from core.network.proxy_parser import parse_proxy
+        from core.network._proxy.parser import parse_proxy
         count = 0
         seen = {ps.url for ps in self._pending}
         for line in proxies:

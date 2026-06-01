@@ -9,7 +9,7 @@ from typing import Optional, Callable
 from dataclasses import dataclass
 from enum import Enum
 
-from core.network.proxy import ProxyPool
+from core.network._proxy.pool import ProxyPool
 
 logger = logging.getLogger("attack_engine")
 

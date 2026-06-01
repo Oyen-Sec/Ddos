@@ -6,8 +6,8 @@ from typing import Optional, Callable, Dict, List, Tuple
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
-from core.network.proxy import ProxyPool
-from core.network.tls import build_headers, build_post_headers, random_profile, BROWSER_PROFILES
+from core.network._proxy.pool import ProxyPool
+from core.network._tls.base import build_headers, build_post_headers, random_profile, BROWSER_PROFILES
 
 logger = logging.getLogger("tier_engine")
 

@@ -131,7 +131,7 @@ class ProxyHarvester:
         """Fetch and parse proxy list from URL"""
         try:
             from curl_cffi.requests import AsyncSession
-            from core.network.proxy_parser import parse_proxy
+            from core.network._proxy.parser import parse_proxy
             kwargs = {"impersonate": "chrome120", "timeout": self.scrape_timeout}
             async with AsyncSession(**kwargs) as sess:
                 resp = await sess.get(url, timeout=self.scrape_timeout)

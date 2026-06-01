@@ -1826,18 +1826,27 @@ class SmartAutoModeV3:
             print(f"  [V3]   Phase 0b skipped: {e}")
         print()
 
-        # Phase 0c: Full bypass orchestrator recon if available
+        # Phase 0c: Full bypass orchestrator recon + 403 bypass
         bypass_recon = {}
         try:
-            from core.bypass.orchestrator import AdvancedOrchestrator, AttackProfile
-            bp = AttackProfile(target_url=self.target)
-            orch = AdvancedOrchestrator(bp)
-            bypass_recon = await orch.reconnaissance()
+            from core.bypass.orchestrator import BypassOrchestrator
+            orb = BypassOrchestrator(timeout=10)
+            bypass_recon = await orb.orchestrate(self.target)
+            waf_methods = len(bypass_recon.get("bypass_methods", []))
             self.bypass_info["orchestrator"] = {
-                "origins": len(bypass_recon.get('techniques',{}).get('origin_discovery',{}).get('origin_servers',[])),
-                "waf_methods": len(bypass_recon.get('techniques',{}).get('waf_bypass',{}).get('working_methods',[])),
+                "origins": 1 if bypass_recon.get("origin_ip") else 0,
+                "waf_methods": waf_methods,
             }
-            print(f"  [V3]   Orchestrator recon: origin={self.bypass_info['orchestrator']['origins']} | WAF methods={self.bypass_info['orchestrator']['waf_methods']}")
+            print(f"  [V3]   Orchestrator recon: origin={bypass_recon.get('origin_ip','?')} | CDN={bypass_recon.get('detected_cdn','?')}")
+            # 403 bypass probe
+            try:
+                from core.bypass.modules.bypass_403 import bypass_403
+                fb = await bypass_403(self.target, timeout=8)
+                if fb.get("bypassed"):
+                    wm = fb.get("working_methods", [])
+                    print(f"  [V3]   403 bypass: {len(wm)} methods working!")
+            except Exception:
+                pass
         except Exception as e:
             print(f"  [V3]   Orchestrator bypass: {e}")
         print()
@@ -2215,18 +2224,25 @@ class SmartAutoModeV5(SmartAutoModeV3):
 
         try:
             print(f"  {_c('c','[*]')} Orchestrator reconnaissance...")
-            from core.bypass.orchestrator import AdvancedOrchestrator, AttackProfile
-            bp = AttackProfile(target_url=self.target)
-            orch = AdvancedOrchestrator(bp)
-            bypass_recon = await orch.reconnaissance()
+            from core.bypass.orchestrator import BypassOrchestrator
+            orb = BypassOrchestrator(timeout=10)
+            bypass_recon = await orb.orchestrate(self.target)
+            waf_methods = len(bypass_recon.get("bypass_methods", []))
             self.bypass_info["orchestrator"] = {
-                "origins": len(bypass_recon.get('techniques',{}).get('origin_discovery',{}).get('origin_servers',[])),
-                "waf_methods": len(bypass_recon.get('techniques',{}).get('waf_bypass',{}).get('working_methods',[])),
+                "origins": 1 if bypass_recon.get("origin_ip") else 0,
+                "waf_methods": waf_methods,
             }
-            origins = self.bypass_info['orchestrator']['origins']
-            waf_m = self.bypass_info['orchestrator']['waf_methods']
-            print(f"      {_c('d','Origins found:')} {_c('g' if origins else 'y',str(origins))}")
-            print(f"      {_c('d','WAF methods:')} {_c('w',str(waf_m))}")
+            print(f"      {_c('d','Origin:')} {_c('g' if bypass_recon.get('origin_ip') else 'y',bypass_recon.get('origin_ip','?') or '?')}")
+            print(f"      {_c('d','WAF methods:')} {_c('w',str(waf_methods))}")
+            # 403 bypass probe
+            try:
+                from core.bypass.modules.bypass_403 import bypass_403
+                fb = await bypass_403(self.target, timeout=8)
+                if fb.get("bypassed"):
+                    b403 = len(fb.get("working_methods", []))
+                    print(f"      {_c('d','403 bypass:')} {_c('g',str(b403)+' methods')}")
+            except Exception:
+                pass
         except Exception as e:
             print(f"  {_c('y','[!]')} Orchestrator error: {str(e)[:40]}")
 

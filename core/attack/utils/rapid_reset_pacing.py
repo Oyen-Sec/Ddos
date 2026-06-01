@@ -193,7 +193,7 @@ async def rapid_reset_with_dynamic_pacing(
             # TLS context with ALPN h2
             ssl_ctx = None
             if is_ssl:
-                from core.network.tls_fingerprint import get_random_ssl_context
+                from core.network._tls.fingerprint import get_random_ssl_context
                 ssl_ctx, _ = get_random_ssl_context()
                 ssl_ctx.set_alpn_protocols(["h2"])
             

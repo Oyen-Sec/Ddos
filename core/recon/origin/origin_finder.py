@@ -1646,12 +1646,61 @@ class OriginDiscoveryV2:
         return found
 
 
+def _is_cdn_response(resp: bytes) -> bool:
+    """Check if HTTP response is from CDN edge (NOT origin)."""
+    resp_lower = resp.lower()
+    # Cloudflare markers
+    if b"cf-ray" in resp_lower or b"__cf_bm" in resp_lower:
+        return True
+    if b"server: cloudflare" in resp_lower:
+        return True
+    # Fastly markers
+    if b"x-served-by" in resp_lower and b"fastly" in resp_lower:
+        return True
+    if b"via: 1.1 varnish" in resp_lower or b"x-cache: hit" in resp_lower:
+        if b"fastly" in resp_lower:
+            return True
+    # CloudFront markers
+    if b"x-amz-cf-id" in resp_lower or b"x-amz-cf-pop" in resp_lower:
+        return True
+    # Akamai markers
+    if b"x-akamai" in resp_lower or b"server: akamai" in resp_lower:
+        return True
+    # Sucuri markers
+    if b"x-sucuri" in resp_lower or b"server: sucuri" in resp_lower:
+        return True
+    return False
+
+def _is_cdn_ip(ip: str) -> bool:
+    """Check if IP belongs to known CDN range (Cloudflare, Fastly, etc.).
+    Some CDNs strip their headers from responses - must check by IP."""
+    cf_prefixes = (
+        "172.64.", "172.65.", "172.66.", "172.67.", "172.68.", "172.69.",
+        "104.16.", "104.17.", "104.18.", "104.19.", "104.20.", "104.21.",
+        "104.22.", "104.23.", "104.24.", "104.25.", "104.26.", "104.27.",
+        "162.158.", "173.245.", "103.21.", "103.22.", "103.31.",
+        "131.0.", "141.101.", "188.114.", "190.93.", "197.234.",
+        "198.41.", "108.162."
+    )
+    if ip.startswith(cf_prefixes):
+        return True
+    if ip.startswith("151.101.") or ip.startswith("199.232."):
+        return True
+    return None
+
 async def _fast_direct_probe(hostname: str) -> Optional[str]:
-    """Very fast check: connect to resolved IP directly with correct Host header,
-    return IP if it serves the same content as the CDN."""
+    """Very fast check: connect to resolved IP directly with correct Host header.
+    Returns IP ONLY if it returns 200 and is NOT a CDN edge (no CF/Fastly/CloudFront headers).
+    Also rejects IPs in known CDN ranges (some CDNs strip headers).
+    False positives (CDN edge returned as origin) cause bypass failure."""
     try:
-        import socket as _sk, ssl as _ssl, hashlib
+        import socket as _sk, ssl as _ssl
         ip = _sk.gethostbyname(hostname)
+
+        # Reject known CDN IP ranges immediately (no need to probe)
+        if _is_cdn_ip(ip):
+            return None
+
         for port, scheme in [(443, 'https'), (80, 'http')]:
             try:
                 s = _sk.socket()
@@ -1668,6 +1717,8 @@ async def _fast_direct_probe(hostname: str) -> Optional[str]:
                 resp = s.recv(4096)
                 s.close()
                 if b"HTTP/1.1 200" in resp or b"HTTP/1.0 200" in resp:
+                    if _is_cdn_response(resp):
+                        return None  # CDN edge, NOT origin
                     return ip
             except Exception:
                 continue
@@ -1676,24 +1727,49 @@ async def _fast_direct_probe(hostname: str) -> Optional[str]:
     return None
 
 
-async def find_origin_ip(target: str, timeout: int = 15) -> Optional[Dict]:
+async def find_origin_ip(target: str, timeout: int = 8, deep: bool = False) -> Optional[Dict]:
     """Find origin IP for a target behind CDN.
+    - timeout: max seconds to spend
+    - deep: if True, run full OriginHunter (45s) - otherwise fast probe only (3s)
     Returns dict with 'origin_ip' key, or None if not found."""
     try:
         from urllib.parse import urlparse
         parsed = urlparse(target)
         hostname = parsed.hostname or target
 
-        # Fast pre-check: resolved IP might be origin if CDN is misconfigured
-        fast = await _fast_direct_probe(hostname)
-        if fast:
-            return {"origin_ip": fast, "method": "direct_probe"}
+        # Fast pre-check (3s) — also rejects CDN IPs
+        import socket as _sk
+        try:
+            resolved_ip = _sk.gethostbyname(hostname)
+        except:
+            resolved_ip = None
+
+        if resolved_ip and not _is_cdn_ip(resolved_ip):
+            fast = await _fast_direct_probe(hostname)
+            if fast:
+                return {"origin_ip": fast, "method": "direct_probe"}
+
+        # Shortcut: don't run full hunter for known CDN targets unless deep=True
+        if not deep or resolved_ip and _is_cdn_ip(resolved_ip):
+            return None
+
+        # Load env with real API keys
+        import os as _os
+        _env = {}
+        _env_path = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.dirname(__file__)))), ".env")
+        if _os.path.exists(_env_path):
+            with open(_env_path) as _f:
+                for _line in _f:
+                    _line = _line.strip()
+                    if _line and not _line.startswith("#") and "=" in _line:
+                        _k, _v = _line.split("=", 1)
+                        _env[_k.strip()] = _v.strip()
 
         # Full hunter (parallel, many sources)
         from core.recon.origin.origin_hunter import OriginHunter
         hunter = OriginHunter(timeout=min(timeout, 8))
         report = await asyncio.wait_for(
-            hunter.hunt(hostname, env={}),
+            hunter.hunt(hostname, env=_env),
             timeout=timeout
         )
         if report.verified_origins:
@@ -1701,7 +1777,7 @@ async def find_origin_ip(target: str, timeout: int = 15) -> Optional[Dict]:
         if report.candidates:
             return {"origin_ip": report.candidates[0].ip, "method": "candidate"}
         return None
-    except asyncio.TimeoutError:
+    except (asyncio.TimeoutError, asyncio.CancelledError):
         return None
     except Exception:
         return None

